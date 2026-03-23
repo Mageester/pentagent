@@ -875,14 +875,47 @@ def tool_lighthouse_audit(url: str) -> ToolResult:
 # ═══════════════════════════════════════════════════════════
 #  TERMINAL ACCESS  (LLM can run any command)
 # ═══════════════════════════════════════════════════════════
+_SAFE_PATTERNS = {
+    "nmap", "nikto", "sqlmap", "nuclei", "subfinder", "httpx", "ffuf",
+    "gobuster", "dirb", "dirsearch", "whatweb", "wpscan", "sslscan",
+    "enum4linux", "amass", "curl", "wget", "whois", "dig", "nslookup",
+    "host", "traceroute", "ping", "openssl", "testssl", "wfuzz",
+    "feroxbuster", "rustscan", "masscan", "theHarvester", "recon-ng",
+    "dnsenum", "dnsrecon", "fierce", "wafw00f", "arjun", "paramspider",
+    "python", "pip", "npm", "apt", "cat", "ls", "dir", "type", "echo",
+    "grep", "find", "head", "tail", "wc", "sort", "uniq", "awk", "sed",
+    "wsl", "which", "where", "whoami", "hostname", "ipconfig", "ifconfig",
+}
+_RISKY_PATTERNS = [
+    "rm -rf", "del /f", "format ", "fdisk", "mkfs",
+    ":(){ :|:& };:",  # fork bomb
+    "shutdown", "reboot", "> /dev/",
+    "metasploit", "msfconsole", "msfvenom",
+    "exploit/", "payload/",
+    "nc -e", "reverse_tcp", "bind_tcp",
+    "passwd", "useradd", "adduser",
+    "iptables -F", "ufw disable",
+]
+
+
+def _is_risky(command: str) -> bool:
+    cmd_lower = command.lower()
+    return any(p in cmd_lower for p in _RISKY_PATTERNS)
+
+
 def tool_run_command(command: str, timeout: int = 120) -> ToolResult:
     """Execute a shell command. The LLM decides what to run."""
     assert STATE is not None
-    # Scope guard: warn if command doesn't reference target domain
-    if STATE.domain not in command and not any(
-        k in command.lower() for k in ["pip", "npm", "install", "nmap", "help", "version", "which", "where"]
-    ):
-        console.print(f"  [yellow]⚠ Command doesn't reference {STATE.domain}[/]")
+
+    # Risky command gate — ask user
+    if _is_risky(command):
+        console.print(f"\n  [bold red]⚠ RISKY COMMAND DETECTED:[/]")
+        console.print(f"  [yellow]{command}[/]")
+        ok = Confirm.ask("  [bold]Allow this command?[/]", default=False)
+        if not ok:
+            return ToolResult(ok=False, output="",
+                              error="User denied risky command")
+
     timeout = min(timeout, COMMAND_TIMEOUT)
     log_path = SCAN_LOGS_DIR / f"cmd_{int(time.time())}.txt"
     try:
@@ -903,6 +936,14 @@ def tool_run_command(command: str, timeout: int = 120) -> ToolResult:
         return ToolResult(ok=False, output="", error=f"Timed out ({timeout}s)")
     except Exception as e:
         return ToolResult(ok=False, output="", error=str(e))
+
+
+def tool_ask_user(question: str) -> ToolResult:
+    """Ask the operator a question and return their response."""
+    console.print(f"\n  [bold bright_cyan]🤖 Agent wants to ask you:[/]")
+    console.print(f"  [bold]{question}[/]")
+    answer = Prompt.ask("  [bold]Your response[/]")
+    return ToolResult(ok=True, output=json.dumps({"question": question, "answer": answer}))
 
 
 def tool_install_tool(tool_name: str) -> ToolResult:
@@ -1062,8 +1103,9 @@ TOOL_DESCRIPTIONS = {
     "security_info_disclosure": "Detect info leakage in headers/errors. args: {url}",
     "security_headers_deep": "Deep security header analysis with A-F grade. args: {url}",
     # Terminal & tools
-    "run_command": "Execute ANY shell command. args: {command, timeout}",
+    "run_command": "Execute ANY shell command freely. args: {command, timeout}",
     "install_tool": "Install a security tool (nmap,nuclei,sqlmap,etc). args: {tool_name}",
+    "ask_user": "Ask the operator a question (for risky/unclear decisions). args: {question}",
     # Browser
     "playwright_screenshot": "Full-page screenshot. args: {url}",
     "playwright_extract": "JS-rendered DOM extract. args: {url}",
@@ -1143,14 +1185,21 @@ Objective: Perform a comprehensive security assessment.
 You have FULL TERMINAL ACCESS via run_command. You can run ANY command.
 External tools detected: {ext_tools}{wsl_info}
 
-IMPORTANT: After installing a tool with install_tool, the current shell may not
-have it in PATH. Use the full path or run via WSL instead.
+You have COMPLETE FREEDOM to run any standard security/recon tool without asking.
+Standard tools include: nmap, nikto, sqlmap, nuclei, dirb, gobuster, whatweb,
+wpscan, sslscan, curl, dig, whois, openssl, feroxbuster, and ALL kali/debian tools.
+
+ONLY use ask_user for:
+- Destructive operations (deleting files, modifying system config)
+- Running exploits or reverse shells (metasploit, msfvenom)
+- Actions that are ambiguous or outside normal recon/scanning
+Do NOT ask permission for standard scanning, enumeration, or recon commands.
 
 Rules:
 - Return STRICT JSON only (no markdown, no extra text)
 - ONLY target the authorized domain
-- Be thorough and systematic
-- Use run_command for anything the built-in tools don't cover
+- Be thorough, aggressive, and systematic
+- Use run_command freely for any tool or command
 - Vary your commands — change flags, targets, or approaches if retrying
 - Finish when you have good coverage and both reports are written
 
@@ -1350,6 +1399,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
     # Terminal & tool install
     registry.register("run_command", tool_run_command)
     registry.register("install_tool", tool_install_tool)
+    registry.register("ask_user", tool_ask_user)
     # Browser & lighthouse
     registry.register("playwright_screenshot", tool_playwright_screenshot)
     registry.register("playwright_extract", tool_playwright_extract)
