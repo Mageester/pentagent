@@ -185,12 +185,14 @@ _SENSITIVE_PATHS = [
 
 
 def check_sensitive_paths(
-    domain: str, session: requests.Session
+    domain: str,
+    session: requests.Session,
+    base_url: str | None = None,
 ) -> Dict[str, Any]:
     """Probe for common sensitive files and directories."""
     findings: List[Finding] = []
     exposed: List[Dict[str, Any]] = []
-    base = f"https://{domain}"
+    base = base_url or f"https://{domain}"
 
     for path, desc, severity in _SENSITIVE_PATHS:
         try:
@@ -226,16 +228,26 @@ def check_sensitive_paths(
 #  4. CORS MISCONFIGURATION
 # ═══════════════════════════════════════════════════════════
 def check_cors(
-    url: str, domain: str, session: requests.Session
+    url: str,
+    domain: str,
+    session: requests.Session,
+    origin_base: str | None = None,
 ) -> Dict[str, Any]:
     """Test CORS by sending forged Origin headers."""
     findings: List[Finding] = []
     results: List[Dict[str, str]] = []
 
+    origin_base = origin_base or f"https://{domain}"
+    parsed_origin = urlparse(origin_base)
+    origin_scheme = parsed_origin.scheme or "https"
+    origin_host = parsed_origin.hostname or domain
+    origin_port = f":{parsed_origin.port}" if parsed_origin.port else ""
+    base_origin = f"{origin_scheme}://{origin_host}{origin_port}"
+
     origins = [
-        f"https://{domain}",
+        base_origin,
         "https://evil.example.com",
-        f"https://sub.{domain}",
+        f"{origin_scheme}://sub.{origin_host}{origin_port}",
         "null",
     ]
 
