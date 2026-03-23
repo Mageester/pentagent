@@ -87,7 +87,7 @@ def _bootstrap_lighthouse() -> Tuple[bool, str]:
     try:
         r = subprocess.run(
             ["npx", "--yes", "lighthouse", "--version"],
-            capture_output=True, text=True, timeout=90, shell=True,
+            capture_output=True, text=True, timeout=90,
         )
         if r.returncode == 0:
             return True, f"v{r.stdout.strip()}"
@@ -114,7 +114,12 @@ def _bootstrap_ollama(model: str) -> Tuple[bool, str]:
     r2 = subprocess.run(
         ["ollama", "list"], capture_output=True, text=True, timeout=15,
     )
-    if model.split(":")[0] not in r2.stdout:
+    installed_models = {
+        line.split()[0]
+        for line in r2.stdout.splitlines()
+        if line.strip() and not line.lower().startswith("name ")
+    }
+    if model not in installed_models:
         print(f"[bootstrap] Pulling {model} …")
         subprocess.run(["ollama", "pull", model], timeout=1800)
     return True, ver
@@ -375,6 +380,7 @@ class AgentState:
     domain: str
     start_url: str
     goal: str
+    mode: str = "web"
     step: int = 0
     queued_urls: List[str] = field(default_factory=list)
     seen_urls: Set[str] = field(default_factory=set)
@@ -389,6 +395,7 @@ class AgentState:
         return {
             "session_id": self.session_id,
             "domain": self.domain,
+            "mode": self.mode,
             "start_url": self.start_url,
             "goal": self.goal,
             "step": self.step,
@@ -407,6 +414,7 @@ class AgentState:
         return cls(
             session_id=data["session_id"],
             domain=data["domain"],
+            mode=data.get("mode", "web"),
             start_url=data["start_url"],
             goal=data["goal"],
             step=data.get("step", 0),
@@ -818,15 +826,15 @@ def tool_playwright_extract(url: str) -> ToolResult:
                           error="Playwright not available")
     assert STATE is not None
     url = normalize_url(url)
+    page = None
     try:
         browser = _get_browser()
         page = browser.new_page()
+        console_errors = []
+        page.on("pageerror", lambda e: console_errors.append(str(e)[:200]))
         page.goto(url, timeout=30000, wait_until="networkidle")
         title = page.title()
         text = page.inner_text("body")[:3000]
-        console_errors = []
-        page.on("pageerror", lambda e: console_errors.append(str(e)[:200]))
-        page.close()
         return ToolResult(ok=True, output=json.dumps({
             "url": url, "rendered_title": title,
             "body_text_preview": text,
@@ -835,6 +843,12 @@ def tool_playwright_extract(url: str) -> ToolResult:
     except Exception as e:
         return ToolResult(ok=False, output="",
                           error=f"DOM extract failed: {e}")
+    finally:
+        if page is not None:
+            try:
+                page.close()
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════
@@ -853,7 +867,7 @@ def tool_lighthouse_audit(url: str) -> ToolResult:
             ["npx", "--yes", "lighthouse", url,
              "--output=json", f"--output-path={out_path}",
              "--chrome-flags=--headless --no-sandbox", "--quiet"],
-            capture_output=True, text=True, timeout=120, shell=True,
+            capture_output=True, text=True, timeout=120,
         )
         if r.returncode == 0 and out_path.exists():
             with open(out_path, "r", encoding="utf-8") as f:
@@ -1323,6 +1337,7 @@ def bootstrap_state(domain: str, mode: str = "web") -> AgentState:
         return AgentState(
             session_id=str(uuid.uuid4()),
             domain=domain,
+            mode=mode,
             start_url="",
             goal=f"Full network penetration test of {domain}",
             queued_urls=[],
@@ -1331,6 +1346,7 @@ def bootstrap_state(domain: str, mode: str = "web") -> AgentState:
     return AgentState(
         session_id=str(uuid.uuid4()),
         domain=domain,
+        mode=mode,
         start_url=start_url,
         goal=f"Full penetration test and security assessment of {domain}",
         queued_urls=[start_url],
@@ -1571,12 +1587,24 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
     agent_start = time.time()
 
     cp = str(CHECKPOINT_PATH)
+    run_mode = getattr(run_agent, '_mode', 'web')
 
     if not fresh and resume and os.path.exists(cp):
-        STATE = AgentState.load(cp)
-        console.print(f"[bold green]Resumed[/] session for [bold]{STATE.domain}[/]")
+        loaded_state = AgentState.load(cp)
+        if loaded_state.domain == domain and loaded_state.mode == run_mode:
+            STATE = loaded_state
+            console.print(
+                f"[bold green]Resumed[/] session for [bold]{STATE.domain}[/]"
+            )
+        else:
+            console.print(
+                "[bold yellow]Checkpoint does not match requested target or mode; "
+                "starting a fresh session.[/]"
+            )
+            STATE = bootstrap_state(domain, mode=run_mode)
+            console.print(f"[bold green]New session[/] for [bold]{STATE.domain}[/]")
     else:
-        STATE = bootstrap_state(domain)
+        STATE = bootstrap_state(domain, mode=run_mode)
         console.print(f"[bold green]New session[/] for [bold]{STATE.domain}[/]")
 
     ui_banner(STATE.domain, profile=getattr(run_agent, '_profile', 'standard'))
@@ -1624,7 +1652,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
 
     # LLM-driven loop
     ui_phase("LLM Phase")
-    mode = getattr(run_agent, '_mode', 'web')
+    mode = run_mode
     sys_prompt = build_network_system_prompt() if mode == "network" else build_system_prompt()
 
     try:
