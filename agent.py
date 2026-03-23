@@ -135,6 +135,27 @@ def _detect_tools() -> Dict[str, bool]:
     return found
 
 
+def _detect_wsl_distros() -> List[str]:
+    """Detect installed WSL distributions."""
+    if not shutil.which("wsl"):
+        return []
+    try:
+        r = subprocess.run(
+            ["wsl", "--list", "--quiet"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return []
+        distros = []
+        for line in r.stdout.strip().splitlines():
+            name = line.strip().strip('\x00')
+            if name and name.lower() not in ('windows subsystem for linux',):
+                distros.append(name)
+        return distros
+    except Exception:
+        return []
+
+
 # ── Execute bootstrap ────────────────────────────────────
 print("[bootstrap] Checking dependencies …")
 _bootstrap_packages()
@@ -145,6 +166,9 @@ if not _OL_OK:
     print(f"[FATAL] Ollama: {_OL_MSG}")
     sys.exit(1)
 _DETECTED_TOOLS = _detect_tools()
+_WSL_DISTROS = _detect_wsl_distros()
+if _WSL_DISTROS:
+    print(f"[bootstrap] WSL distros found: {', '.join(_WSL_DISTROS)}")
 
 # ═══════════════════════════════════════════════════════════
 #  PHASE 1 — THIRD-PARTY IMPORTS  (guaranteed present)
@@ -1088,6 +1112,24 @@ def build_system_prompt() -> str:
     )
     avail = [t for t, ok in _DETECTED_TOOLS.items() if ok]
     ext_tools = ", ".join(avail) if avail else "none"
+    wsl_info = ""
+    if _WSL_DISTROS:
+        wsl_info = f"""\n\nWSL DISTRIBUTIONS AVAILABLE: {', '.join(_WSL_DISTROS)}
+You can run ANY Linux tool via WSL. This is your MOST POWERFUL capability.
+Kali Linux and Athena OS have hundreds of pre-installed security tools.
+Use: wsl -d <distro> <command>
+Examples:
+- wsl -d kali-linux nmap -sV -sC -A {{domain}}
+- wsl -d kali-linux nikto -h https://{{domain}}
+- wsl -d kali-linux whatweb https://{{domain}}
+- wsl -d kali-linux wpscan --url https://{{domain}}
+- wsl -d kali-linux dirb https://{{domain}}
+- wsl -d kali-linux sqlmap -u "https://{{domain}}/page?id=1" --batch
+- wsl -d kali-linux nuclei -u https://{{domain}}
+- wsl -d kali-linux gobuster dir -u https://{{domain}} -w /usr/share/wordlists/dirb/common.txt
+- wsl -d kali-linux sslscan {{domain}}
+- wsl -d kali-linux enum4linux {{domain}}
+PREFER WSL tools over native Windows tools — they are more capable."""
     return f"""You are an elite autonomous penetration testing agent.
 You are AUTHORIZED to test ONLY this target domain: {{domain}}
 
@@ -1099,20 +1141,17 @@ Objective: Perform a comprehensive security assessment.
 5. Reporting — write comprehensive JSON + markdown reports
 
 You have FULL TERMINAL ACCESS via run_command. You can run ANY command.
-External tools detected: {ext_tools}
-If a tool is missing, use install_tool to install it, then use run_command to run it.
+External tools detected: {ext_tools}{wsl_info}
 
-Example commands you can run:
-- nmap -sV -sC {{domain}}
-- python -m sqlmap -u "https://{{domain}}/page?id=1" --batch --level=2
-- nuclei -u https://{{domain}} -t cves/ -silent
+IMPORTANT: After installing a tool with install_tool, the current shell may not
+have it in PATH. Use the full path or run via WSL instead.
 
 Rules:
 - Return STRICT JSON only (no markdown, no extra text)
 - ONLY target the authorized domain
 - Be thorough and systematic
 - Use run_command for anything the built-in tools don't cover
-- Avoid repeating the exact same action
+- Vary your commands — change flags, targets, or approaches if retrying
 - Finish when you have good coverage and both reports are written
 
 Available tools:
@@ -1191,6 +1230,7 @@ def summarize_memory() -> None:
 #  AGENT RUNNER
 # ═══════════════════════════════════════════════════════════
 def bootstrap_state(domain: str) -> AgentState:
+    domain = domain.strip().strip("/")  # Remove trailing slash
     start_url = normalize_url(f"https://{domain}")
     return AgentState(
         session_id=str(uuid.uuid4()),
@@ -1286,7 +1326,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
         STATE = bootstrap_state(domain)
         console.print(f"[bold green]New session[/] for [bold]{STATE.domain}[/]")
 
-    ui_banner(STATE.domain)
+    ui_banner(STATE.domain, profile=getattr(run_agent, '_profile', 'standard'))
 
     registry = ToolRegistry()
     # Recon & crawling
@@ -1359,14 +1399,17 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
                 args = decision.get("args", {}) or {}
                 sig = f"{tool_name}:{json.dumps(args, sort_keys=True)}"
 
-                if sig in STATE.recent_tool_signatures[-4:]:
+                if sig in STATE.recent_tool_signatures[-6:]:
                     STATE.notes.append(f"Skipped repeat: {sig}")
                     console.print(
                         f"  [dim]⤳ skipped (duplicate action)[/]")
                     continue
 
                 result = registry.call(tool_name, **args)
-                add_sig(sig)
+                # Only record signature for successful calls
+                # so retries after tool install actually run
+                if result.ok:
+                    add_sig(sig)
 
                 # Build summary
                 summary = ""
@@ -1453,7 +1496,8 @@ def interactive_startup() -> Tuple[str, str, bool]:
         "permission to test the target domain.[/]",
         border_style="bright_red", padding=(1, 2),
     ))
-    domain = Prompt.ask("\n[bold]Target domain[/]", default=DEFAULT_DOMAIN)
+    raw = Prompt.ask("\n[bold]Target domain[/]", default=DEFAULT_DOMAIN)
+    domain = raw.strip().strip("/")  # Clean trailing slash
     profile = Prompt.ask(
         "[bold]Scan profile[/]",
         choices=["quick", "standard", "deep"],
@@ -1491,4 +1535,5 @@ if __name__ == "__main__":
         p = SCAN_PROFILES.get(_profile, SCAN_PROFILES["standard"])
         MAX_STEPS = p["max_steps"]
         BOOTSTRAP_BATCH = p["batch"]
+        run_agent._profile = _profile  # type: ignore
     run_agent(_domain, resume=not _fresh, fresh=_fresh)
