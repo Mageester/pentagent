@@ -21,6 +21,7 @@ import importlib.util
 import json
 import hashlib
 import os
+import pathlib
 import re
 import shutil
 import signal
@@ -132,7 +133,12 @@ def _detect_tools() -> Dict[str, bool]:
         found["sqlmap"] = True
     # Check WSL availability
     found["wsl"] = shutil.which("wsl") is not None
+    # Check Burp Suite Pro
+    found["burpsuite"] = BURP_JAR_PATH.exists()
     return found
+
+BURP_JAR_PATH = pathlib.Path(r"C:\Burp\burpsuite_pro_v2025.jar")
+BURP_LOADER_PATH = pathlib.Path(r"C:\Burp\loader.jar")
 
 
 def _detect_wsl_distros() -> List[str]:
@@ -169,6 +175,8 @@ _DETECTED_TOOLS = _detect_tools()
 _WSL_DISTROS = _detect_wsl_distros()
 if _WSL_DISTROS:
     print(f"[bootstrap] WSL distros found: {', '.join(_WSL_DISTROS)}")
+if _DETECTED_TOOLS.get("burpsuite"):
+    print(f"[bootstrap] Burp Suite Pro detected at {BURP_JAR_PATH}")
 
 # ═══════════════════════════════════════════════════════════
 #  PHASE 1 — THIRD-PARTY IMPORTS  (guaranteed present)
@@ -1172,6 +1180,18 @@ Examples:
 - wsl -d kali-linux sslscan {{domain}}
 - wsl -d kali-linux enum4linux {{domain}}
 PREFER WSL tools over native Windows tools — they are more capable."""
+    burp_info = ""
+    if _DETECTED_TOOLS.get("burpsuite"):
+        burp_info = f"""\n\nBURP SUITE PROFESSIONAL available at: {BURP_JAR_PATH}
+Burp Pro has powerful scanning capabilities. You can use it via run_command.
+Burp REST API (if running): http://127.0.0.1:1337/v0.1/
+To start a scan via Burp REST API:
+  curl -X POST http://127.0.0.1:1337/v0.1/scan -d '{{
+    "urls": ["https://{{domain}}"],
+    "scan_configurations": [{{"type": "NamedConfiguration", "name": "Crawl and Audit - Lightweight"}}]
+  }}'
+To check scan status:
+  curl http://127.0.0.1:1337/v0.1/scan/{{task_id}}"""
     return f"""You are an elite autonomous penetration testing agent.
 You are AUTHORIZED to test ONLY this target domain: {{domain}}
 
@@ -1183,7 +1203,7 @@ Objective: Perform a comprehensive security assessment.
 5. Reporting — write comprehensive JSON + markdown reports
 
 You have FULL TERMINAL ACCESS via run_command. You can run ANY command.
-External tools detected: {ext_tools}{wsl_info}
+External tools detected: {ext_tools}{wsl_info}{burp_info}
 
 You have COMPLETE FREEDOM to run any standard security/recon tool without asking.
 Standard tools include: nmap, nikto, sqlmap, nuclei, dirb, gobuster, whatweb,
@@ -1232,24 +1252,42 @@ def build_user_prompt(state: AgentState) -> str:
 
 
 def chat_json(messages: List[Dict[str, str]]) -> Dict[str, Any]:
-    resp = llm.chat(model=MODEL, messages=messages)
+    # Disable Qwen3 thinking mode for faster, cleaner JSON output
+    if messages and messages[0]["role"] == "system":
+        messages = list(messages)  # copy
+        messages[0] = dict(messages[0])
+        if "/no_think" not in messages[0]["content"]:
+            messages[0]["content"] += "\n/no_think"
+
+    try:
+        with console.status("[bold cyan]LLM thinking…", spinner="dots"):
+            resp = llm.chat(
+                model=MODEL,
+                messages=messages,
+                options={"num_predict": 512, "temperature": 0.3},
+            )
+    except Exception as e:
+        console.print(f"  [red]LLM error: {e}[/]")
+        return {"action": "summarize", "summary": f"LLM error: {e}"}
+
     content = _get_content(resp)
     try:
         return _extract_json(content)
     except json.JSONDecodeError:
         # Ask LLM to repair
-        repair_resp = llm.chat(
-            model=MODEL,
-            messages=[
-                {"role": "system",
-                 "content": "Repair this into valid JSON only. Return JSON only."},
-                {"role": "user", "content": content},
-            ],
-        )
-        repair_text = _get_content(repair_resp)
         try:
+            repair_resp = llm.chat(
+                model=MODEL,
+                messages=[
+                    {"role": "system",
+                     "content": "Repair this into valid JSON only. Return JSON only. /no_think"},
+                    {"role": "user", "content": content[:2000]},
+                ],
+                options={"num_predict": 256, "temperature": 0.1},
+            )
+            repair_text = _get_content(repair_resp)
             return _extract_json(repair_text)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, Exception):
             return {"action": "summarize",
                     "summary": "LLM output was not parseable JSON"}
 
@@ -1267,9 +1305,10 @@ def summarize_memory() -> None:
         messages=[
             {"role": "system", "content":
              "Summarize durable facts from this audit session. "
-             "Keep it compact and useful for continuation."},
+             "Keep it compact and useful for continuation. /no_think"},
             {"role": "user", "content": payload},
         ],
+        options={"num_predict": 512, "temperature": 0.2},
     )
     text = _strip_think(_get_content(resp))
     STATE.memory_summary = text[:2500]
