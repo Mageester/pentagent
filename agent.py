@@ -1278,8 +1278,16 @@ def summarize_memory() -> None:
 # ═══════════════════════════════════════════════════════════
 #  AGENT RUNNER
 # ═══════════════════════════════════════════════════════════
-def bootstrap_state(domain: str) -> AgentState:
+def bootstrap_state(domain: str, mode: str = "web") -> AgentState:
     domain = domain.strip().strip("/")  # Remove trailing slash
+    if mode == "network":
+        return AgentState(
+            session_id=str(uuid.uuid4()),
+            domain=domain,
+            start_url="",
+            goal=f"Full network penetration test of {domain}",
+            queued_urls=[],
+        )
     start_url = normalize_url(f"https://{domain}")
     return AgentState(
         session_id=str(uuid.uuid4()),
@@ -1288,6 +1296,115 @@ def bootstrap_state(domain: str) -> AgentState:
         goal=f"Full penetration test and security assessment of {domain}",
         queued_urls=[start_url],
     )
+
+
+def _detect_local_subnets() -> List[str]:
+    """Auto-detect local network subnets."""
+    subnets = []
+    try:
+        r = subprocess.run(
+            ["ipconfig"] if os.name == "nt" else ["ip", "addr"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # Find IPv4 addresses and masks
+        import re as _re
+        for match in _re.finditer(
+            r"IPv4 Address[.\s]*:\s*(\d+\.\d+\.\d+\.\d+)", r.stdout
+        ):
+            ip = match.group(1)
+            if ip.startswith("127."):
+                continue
+            # Guess /24 subnet
+            parts = ip.split(".")
+            subnet = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+            if subnet not in subnets:
+                subnets.append(subnet)
+    except Exception:
+        pass
+    return subnets
+
+
+def build_network_system_prompt() -> str:
+    """System prompt for network pentest mode."""
+    tool_lines = "\n".join(
+        f"  - {name}: {desc}" for name, desc in TOOL_DESCRIPTIONS.items()
+    )
+    avail = [t for t, ok in _DETECTED_TOOLS.items() if ok]
+    ext_tools = ", ".join(avail) if avail else "none"
+    wsl_info = ""
+    if _WSL_DISTROS:
+        wsl_info = f"""\n\nWSL DISTRIBUTIONS: {', '.join(_WSL_DISTROS)}
+Use: wsl -d <distro> <command>
+Kali/Athena have all network pentesting tools pre-installed.
+Examples:
+- wsl -d kali-linux nmap -sV -sC -A -T4 <target>
+- wsl -d kali-linux nmap -sn <subnet>
+- wsl -d kali-linux enum4linux -a <host>
+- wsl -d kali-linux smbclient -L //<host> -N
+- wsl -d kali-linux nbtscan <subnet>
+- wsl -d kali-linux snmpwalk -v2c -c public <host>
+- wsl -d kali-linux hydra -L users.txt -P pass.txt <host> ssh
+- wsl -d kali-linux nmap --script vuln <host>
+- wsl -d kali-linux masscan <subnet> -p1-65535 --rate=1000
+PREFER WSL tools — they are more powerful than native Windows."""
+    return f"""You are an elite autonomous NETWORK penetration testing agent.
+You are authorized to test the ENTIRE network: {{target}}
+
+Objective: Perform a comprehensive network security assessment.
+
+Phase 1 — Network Discovery:
+- Identify all live hosts (nmap ping sweep, ARP scan)
+- Map the network topology
+- Identify gateways, DNS servers, DHCP servers
+
+Phase 2 — Host Enumeration (for EACH discovered host):
+- Full port scan (TCP + top UDP ports)
+- Service version detection (-sV)
+- OS fingerprinting (-O)
+- Script scanning (--script=default,vuln)
+
+Phase 3 — Service-Specific Testing:
+- Web servers: check for vulns, misconfigs, default creds
+- SMB/CIFS: enumerate shares, check for EternalBlue, null sessions
+- SSH: check versions, weak ciphers, default creds
+- FTP: anonymous login, version vulns
+- DNS: zone transfers, cache poisoning
+- SNMP: community string guessing
+- RDP: BlueKeep check, NLA settings
+- Databases: default creds, exposed instances
+
+Phase 4 — Vulnerability Assessment:
+- Run nmap vulnerability scripts
+- Check for known CVEs per service version
+- Test for common misconfigurations
+- Check for default/weak credentials
+
+Phase 5 — Reporting:
+- Write comprehensive JSON + markdown reports
+- Include per-host findings
+- Risk ratings for each finding
+- Remediation recommendations
+
+You have FULL TERMINAL ACCESS via run_command.
+External tools: {ext_tools}{wsl_info}
+
+You have COMPLETE FREEDOM to run any tool. Only use ask_user for genuinely
+destructive operations (exploit execution, credential attacks, etc.).
+
+Rules:
+- Return STRICT JSON only
+- Be thorough — scan EVERY host you discover
+- Vary your approach per host based on services found
+- Log everything for the report
+- Finish when all hosts are assessed and reports are written
+
+Available tools:
+{tool_lines}
+
+Actions (return ONE as JSON):
+1. {{{{"action":"tool","tool":"<name>","args":{{}},"why":"reason"}}}}
+2. {{{{"action":"summarize","summary":"brief note"}}}}
+3. {{{{"action":"finish","reason":"why assessment is complete"}}}}"""
 
 
 def deterministic_kickoff(registry: ToolRegistry) -> None:
@@ -1316,6 +1433,54 @@ def deterministic_kickoff(registry: ToolRegistry) -> None:
     if LIGHTHOUSE_AVAILABLE:
         steps.append(("lighthouse_audit", {"url": STATE.start_url}))
 
+    _run_kickoff_steps(steps, registry)
+
+
+def network_kickoff(registry: ToolRegistry) -> None:
+    """Deterministic kickoff for network mode."""
+    assert STATE is not None
+    ui_phase("Network Discovery Phase")
+    target = STATE.domain
+
+    steps: List[Tuple[str, Dict[str, Any]]] = []
+    # Auto-detect subnets if target is 'auto'
+    if target.lower() == "auto":
+        subnets = _detect_local_subnets()
+        if subnets:
+            STATE.notes.append(f"Auto-detected subnets: {subnets}")
+            console.print(f"  [bold green]Detected subnets:[/] {', '.join(subnets)}")
+            target = subnets[0]  # Primary subnet
+            STATE.domain = target
+            STATE.goal = f"Full network penetration test of {target}"
+        else:
+            console.print("  [red]Could not auto-detect subnets. Using 192.168.1.0/24[/]")
+            target = "192.168.1.0/24"
+            STATE.domain = target
+
+    # Host discovery via nmap ping sweep (prefer WSL)
+    if _WSL_DISTROS:
+        distro = _WSL_DISTROS[0]
+        steps.append(("run_command", {
+            "command": f"wsl -d {distro} nmap -sn {target} -oG -",
+            "timeout": 120,
+        }))
+        # Quick service scan on common ports
+        steps.append(("run_command", {
+            "command": f"wsl -d {distro} nmap -sV --top-ports 100 -T4 {target} -oN -",
+            "timeout": 300,
+        }))
+    else:
+        steps.append(("run_command", {
+            "command": f"nmap -sn {target}",
+            "timeout": 120,
+        }))
+
+    _run_kickoff_steps(steps, registry)
+
+
+def _run_kickoff_steps(steps: List[Tuple[str, Dict[str, Any]]],
+                       registry: ToolRegistry) -> None:
+    """Execute deterministic kickoff steps with UI output."""
     for tool_name, args in steps:
         result = registry.call(tool_name, **args)
         detail = args.get("url", "")
@@ -1411,11 +1576,17 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
 
     # Deterministic kickoff
     if len(STATE.pages) == 0 and len(STATE.recent_events) == 0:
-        deterministic_kickoff(registry)
+        mode = getattr(run_agent, '_mode', 'web')
+        if mode == "network":
+            network_kickoff(registry)
+        else:
+            deterministic_kickoff(registry)
         STATE.checkpoint(cp)
 
     # LLM-driven loop
     ui_phase("LLM Phase")
+    mode = getattr(run_agent, '_mode', 'web')
+    sys_prompt = build_network_system_prompt() if mode == "network" else build_system_prompt()
 
     try:
         for _ in range(MAX_STEPS):
@@ -1430,7 +1601,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
             # LLM decides
             t0 = time.time()
             decision = chat_json([
-                {"role": "system", "content": build_system_prompt()},
+                {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": build_user_prompt(STATE)},
             ])
             llm_dur = time.time() - t0
@@ -1537,17 +1708,31 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
 # ═══════════════════════════════════════════════════════════
 #  INTERACTIVE STARTUP
 # ═══════════════════════════════════════════════════════════
-def interactive_startup() -> Tuple[str, str, bool]:
-    """Interactive menu when no CLI args given. Returns (domain, profile, fresh)."""
+def interactive_startup() -> Tuple[str, str, str, bool]:
+    """Interactive menu. Returns (target, profile, mode, fresh)."""
     console.print(_ASCII_BANNER)
     console.print(Panel(
         "[bold]Autonomous Pentest Agent[/]\n"
         "[dim]Authorized penetration testing only. You must have explicit\n"
-        "permission to test the target domain.[/]",
+        "permission to test the target domain or network.[/]",
         border_style="bright_red", padding=(1, 2),
     ))
-    raw = Prompt.ask("\n[bold]Target domain[/]", default=DEFAULT_DOMAIN)
-    domain = raw.strip().strip("/")  # Clean trailing slash
+    mode = Prompt.ask(
+        "\n[bold]Mode[/]",
+        choices=["web", "network"],
+        default="web",
+    )
+    if mode == "network":
+        subnets = _detect_local_subnets()
+        if subnets:
+            console.print(f"  [dim]Detected subnets:[/] {', '.join(subnets)}")
+        raw = Prompt.ask(
+            "[bold]Target (subnet CIDR or 'auto')[/]",
+            default="auto",
+        )
+    else:
+        raw = Prompt.ask("[bold]Target domain[/]", default=DEFAULT_DOMAIN)
+    target = raw.strip().strip("/")
     profile = Prompt.ask(
         "[bold]Scan profile[/]",
         choices=["quick", "standard", "deep"],
@@ -1557,7 +1742,7 @@ def interactive_startup() -> Tuple[str, str, bool]:
         "[bold]Resume from checkpoint if available?[/]", default=True
     )
     console.print()
-    return domain, profile, fresh
+    return target, profile, mode, fresh
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1568,6 +1753,7 @@ if __name__ == "__main__":
     _resume = True
     _fresh = False
     _cli = False
+    _mode = "web"
     for arg in sys.argv[1:]:
         if arg == "--resume":
             _resume = True
@@ -1575,15 +1761,22 @@ if __name__ == "__main__":
         elif arg == "--fresh":
             _fresh = True
             _cli = True
+        elif arg == "--network":
+            _mode = "network"
+            _cli = True
         elif not arg.startswith("-"):
             _domain = arg
             _cli = True
 
     if not _cli:
         # Interactive mode
-        _domain, _profile, _fresh = interactive_startup()
+        _domain, _profile, _mode, _fresh = interactive_startup()
         p = SCAN_PROFILES.get(_profile, SCAN_PROFILES["standard"])
         MAX_STEPS = p["max_steps"]
         BOOTSTRAP_BATCH = p["batch"]
         run_agent._profile = _profile  # type: ignore
-    run_agent(_domain, resume=not _fresh, fresh=_fresh)
+    run_agent._mode = _mode  # type: ignore
+    if _mode == "network":
+        run_agent(_domain, resume=not _fresh, fresh=_fresh)
+    else:
+        run_agent(_domain, resume=not _fresh, fresh=_fresh)
