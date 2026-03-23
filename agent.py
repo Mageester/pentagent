@@ -28,6 +28,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -139,7 +140,8 @@ def _detect_tools() -> Dict[str, bool]:
     """Detect security tools in PATH."""
     tools = ["nmap", "sqlmap", "nuclei", "subfinder", "httpx",
              "ffuf", "nikto", "gobuster", "dirsearch", "wpscan",
-             "testssl.sh", "whatweb", "wfuzz", "amass"]
+             "testssl.sh", "whatweb", "wfuzz", "amass", "git",
+             "curl", "jq", "dig", "whois", "openssl"]
     found = {}
     for t in tools:
         found[t] = shutil.which(t) is not None
@@ -469,12 +471,26 @@ class ToolRegistry:
     def register(self, name: str, fn: Callable[..., ToolResult]) -> None:
         self.tools[name] = fn
 
+    def _resolve_name(self, name: str) -> str:
+        if name in self.tools:
+            return name
+        canonical = _canonical_tool_name(name)
+        for candidate in (
+            canonical,
+            canonical.replace("__", "_"),
+            name.strip().lower(),
+        ):
+            if candidate in self.tools:
+                return candidate
+        return ""
+
     def call(self, name: str, **kwargs: Any) -> ToolResult:
-        if name not in self.tools:
+        resolved_name = self._resolve_name(name)
+        if not resolved_name:
             return ToolResult(ok=False, output="", error=f"Unknown tool: {name}")
         start = time.time()
         try:
-            fn = self.tools[name]
+            fn = self.tools[resolved_name]
             try:
                 sig = inspect.signature(fn)
                 params = list(sig.parameters.values())
@@ -549,6 +565,10 @@ def same_domain(url: str, domain: str) -> bool:
 
 def compact_text(text: str, max_len: int = 300) -> str:
     return re.sub(r"\s+", " ", text or "").strip()[:max_len]
+
+
+def _canonical_tool_name(name: str) -> str:
+    return re.sub(r"[\s\-]+", "_", (name or "").strip().lower())
 
 
 def record_finding(kind: str, severity: str, url: str, detail: str) -> None:
@@ -895,6 +915,64 @@ def tool_site_snapshot() -> ToolResult:
     }, indent=2))
 
 
+def tool_site_map(target: str = "", include_queue: bool = True,
+                  max_pages: int = 50) -> ToolResult:
+    assert STATE is not None
+    seed = normalize_url(target or STATE.start_url or _state_origin_url())
+    seed_note = ""
+    seed_result: Optional[ToolResult] = None
+
+    if (STATE.mode == "web" and seed and same_domain(seed, STATE.domain)
+            and seed not in STATE.pages):
+        try:
+            seed_result = tool_fetch_page(seed)
+            if seed_result.ok:
+                seed_note = f"Seeded map with {seed}"
+            else:
+                seed_note = f"Seed fetch failed: {seed_result.error[:160]}"
+        except Exception as e:
+            seed_result = ToolResult(ok=False, output="", error=str(e))
+            seed_note = f"Seed fetch failed: {str(e)[:160]}"
+
+    try:
+        snapshot_data = json.loads(tool_site_snapshot().output)
+    except Exception:
+        snapshot_data = {
+            "domain": STATE.domain,
+            "pages_seen": len(STATE.pages),
+            "queued_urls": len(STATE.queued_urls),
+            "findings_total": len(STATE.findings),
+        }
+
+    page_summaries = []
+    for url, pg in list(STATE.pages.items())[:max_pages]:
+        page_summaries.append({
+            "url": url,
+            "status_code": pg.get("status_code"),
+            "title": pg.get("title", ""),
+            "h1": pg.get("h1", ""),
+            "internal_links": len(pg.get("internal_links", [])),
+            "external_links": len(pg.get("external_links", [])),
+            "forms": pg.get("form_count", 0),
+            "issues": pg.get("issues", []),
+        })
+
+    data: Dict[str, Any] = {
+        **snapshot_data,
+        "target": seed,
+        "seed_note": seed_note,
+        "page_summaries": page_summaries,
+        "queue_preview": STATE.queued_urls[:max_pages] if include_queue else [],
+    }
+    if seed_result is not None:
+        data["seed_fetch"] = {
+            "ok": seed_result.ok,
+            "error": seed_result.error[:200] if seed_result.error else "",
+            "output": seed_result.output[:300] if seed_result.output else "",
+        }
+    return ToolResult(ok=True, output=json.dumps(data, indent=2))
+
+
 # ═══════════════════════════════════════════════════════════
 #  PLAYWRIGHT TOOLS
 # ═══════════════════════════════════════════════════════════
@@ -1051,29 +1129,34 @@ def _is_risky(command: str) -> bool:
 
 
 _WSL_ROUTED_TOOLS = {
-    "amass", "arjun", "dirb", "dirsearch", "dnsenum", "dnsrecon",
-    "enum4linux", "enum4linux-ng", "ffuf", "feroxbuster", "gobuster",
-    "hydra", "httpx", "httpx-toolkit", "masscan", "nbtscan", "nikto",
-    "nmap", "nuclei", "paramspider", "recon-ng", "rustscan",
-    "smbclient", "snmpwalk", "sqlmap", "subfinder", "testssl.sh",
-    "theharvester", "wafw00f", "whatweb", "wfuzz", "wpscan",
+    "amass", "arjun", "curl", "dirb", "dirsearch", "dig", "dnsenum",
+    "dnsrecon", "enum4linux", "enum4linux-ng", "ffuf", "feroxbuster",
+    "git", "gobuster", "hydra", "httpx", "httpx-toolkit", "jq",
+    "masscan", "nbtscan", "nikto", "nmap", "nuclei", "openssl",
+    "paramspider", "recon-ng", "rustscan", "smbclient", "snmpwalk",
+    "sqlmap", "subfinder", "testssl.sh", "theharvester", "wafw00f",
+    "whatweb", "whois", "wfuzz", "wpscan",
 }
 
 _WSL_APT_PACKAGES = {
     "amass": ["amass"],
     "arjun": ["arjun"],
+    "curl": ["curl"],
     "dirb": ["dirb"],
     "dirsearch": ["dirsearch"],
+    "dig": ["dnsutils"],
     "dnsenum": ["dnsenum"],
     "dnsrecon": ["dnsrecon"],
     "enum4linux": ["enum4linux", "enum4linux-ng"],
     "enum4linux-ng": ["enum4linux-ng", "enum4linux"],
     "ffuf": ["ffuf"],
+    "git": ["git"],
     "feroxbuster": ["feroxbuster"],
     "gobuster": ["gobuster"],
     "hydra": ["hydra"],
     "httpx": ["httpx-toolkit", "httpx"],
     "httpx-toolkit": ["httpx-toolkit", "httpx"],
+    "jq": ["jq"],
     "masscan": ["masscan"],
     "nbtscan": ["nbtscan"],
     "nikto": ["nikto"],
@@ -1090,6 +1173,7 @@ _WSL_APT_PACKAGES = {
     "theharvester": ["theharvester"],
     "wafw00f": ["wafw00f"],
     "whatweb": ["whatweb"],
+    "whois": ["whois"],
     "wfuzz": ["wfuzz"],
     "wpscan": ["wpscan"],
 }
@@ -1134,13 +1218,13 @@ def _wsl_tool_available(distro: str, tool_name: str) -> bool:
 def _preferred_wsl_distro(tool_name: str = "") -> str:
     if not _WSL_DISTROS:
         return ""
-    if tool_name:
-        for distro in _WSL_DISTROS:
-            if _wsl_tool_available(distro, tool_name):
-                return distro
     for needle in ("kali", "athena"):
         for distro in _WSL_DISTROS:
             if needle in distro.lower():
+                return distro
+    if tool_name:
+        for distro in _WSL_DISTROS:
+            if _wsl_tool_available(distro, tool_name):
                 return distro
     return _WSL_DISTROS[0]
 
@@ -1157,6 +1241,60 @@ def _command_entrypoint(command: str) -> str:
     return parts[idx] if idx < len(parts) else ""
 
 
+def _shell_join(tokens: List[str]) -> str:
+    specials = {"&&", "||", "|", ";", "&", ">", ">>", "<", "(", ")"}
+    pieces = []
+    for token in tokens:
+        if token in specials:
+            pieces.append(token)
+        else:
+            pieces.append(shlex.quote(token))
+    return " ".join(pieces)
+
+
+def _parse_wsl_command(command: str) -> Optional[Tuple[str, str, str]]:
+    text = command.strip()
+    if not text.lower().startswith("wsl"):
+        return None
+    try:
+        parts = shlex.split(text, posix=True)
+    except ValueError:
+        return None
+    if not parts or parts[0].lower() not in {"wsl", "wsl.exe"}:
+        return None
+
+    distro = ""
+    user = "root"
+    saw_target = False
+    idx = 1
+    while idx < len(parts):
+        token = parts[idx].lower()
+        if token in {"-d", "--distribution"} and idx + 1 < len(parts):
+            distro = parts[idx + 1]
+            saw_target = True
+            idx += 2
+            continue
+        if token in {"-u", "--user"} and idx + 1 < len(parts):
+            user = parts[idx + 1]
+            saw_target = True
+            idx += 2
+            continue
+        if token in {"--cd"} and idx + 1 < len(parts):
+            idx += 2
+            continue
+        if token in {"--", "-e", "--exec"}:
+            idx += 1
+            break
+        if token.startswith("-") and not saw_target:
+            return None
+        break
+
+    inner = _shell_join(parts[idx:])
+    if not inner:
+        return None
+    return (distro or _preferred_wsl_distro(), inner, user)
+
+
 def _should_route_to_wsl(command: str) -> bool:
     if not _WSL_DISTROS:
         return False
@@ -1164,9 +1302,14 @@ def _should_route_to_wsl(command: str) -> bool:
     return entrypoint in _WSL_ROUTED_TOOLS
 
 
-def _wsl_run(command: str, distro: str, timeout: int) -> subprocess.CompletedProcess[str]:
+def _wsl_run(command: str, distro: str, timeout: int,
+             user: str = "root") -> subprocess.CompletedProcess[str]:
+    wsl_args = ["wsl", "-d", distro]
+    if user:
+        wsl_args += ["-u", user]
+    wsl_args += ["bash", "-lc", command]
     return subprocess.run(
-        ["wsl", "-d", distro, "-u", "root", "bash", "-lc", command],
+        wsl_args,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -1236,8 +1379,15 @@ def tool_run_command(command: str, timeout: int = 120) -> ToolResult:
     timeout = min(timeout, COMMAND_TIMEOUT)
     log_path = SCAN_LOGS_DIR / f"cmd_{time.time_ns()}_{uuid.uuid4().hex[:8]}.txt"
     try:
-        routed_to_wsl = _should_route_to_wsl(command)
-        if routed_to_wsl:
+        wsl_command = _parse_wsl_command(command)
+        routed_to_wsl = wsl_command is not None or _should_route_to_wsl(command)
+        if wsl_command is not None:
+            distro, inner_command, user = wsl_command
+            console.print(
+                f"  [dim]Routing direct WSL command to distro:[/] [bold]{distro}[/]"
+            )
+            r = _wsl_run(inner_command, distro, timeout, user=user)
+        elif _should_route_to_wsl(command):
             entrypoint = _command_entrypoint(command)
             distro = _preferred_wsl_distro(entrypoint)
             console.print(
@@ -1269,7 +1419,13 @@ def tool_run_command(command: str, timeout: int = 120) -> ToolResult:
                     or "not recognized" in stderr_text):
                 install_tool_result = tool_install_tool(missing_tool)
                 if install_tool_result.ok:
-                    if routed_to_wsl:
+                    if wsl_command is not None:
+                        distro, inner_command, user = wsl_command
+                        console.print(
+                            f"  [dim]Retrying direct WSL command after installing {missing_tool}...[/]"
+                        )
+                        r = _wsl_run(inner_command, distro, timeout, user=user)
+                    elif routed_to_wsl:
                         distro = _preferred_wsl_distro(missing_tool)
                         console.print(
                             f"  [dim]Retrying command in WSL after installing {missing_tool}...[/]"
@@ -1372,6 +1528,138 @@ def tool_install_tool(tool_name: str) -> ToolResult:
     )
 
 
+def tool_install(package: str = "", destination: str = "",
+                 source: str = "") -> ToolResult:
+    assert STATE is not None
+    package_name = (package or "").strip()
+    dest = (destination or "").strip()
+    src = (source or "").strip()
+
+    requested = " ".join(part for part in [package_name, src, dest] if part).lower()
+    wants_nuclei_templates = (
+        "nuclei-templates" in requested or package_name.lower() == "nuclei-templates"
+    )
+    if wants_nuclei_templates:
+        repo = src or "https://github.com/projectdiscovery/nuclei-templates.git"
+        dest = dest or "/usr/local/share/nuclei-templates"
+        distro = _preferred_wsl_distro("git")
+        if not distro:
+            return ToolResult(
+                ok=False,
+                output="",
+                error="No WSL distro available to install nuclei templates.",
+            )
+        if _wsl_run(f"test -d {shlex.quote(dest)}/.git", distro, 30).returncode == 0:
+            r = _wsl_run(
+                f"git -C {shlex.quote(dest)} pull --ff-only",
+                distro,
+                1200,
+            )
+            if r.returncode != 0 and "not found" in (r.stderr or "").lower():
+                install_result = tool_install_tool("git")
+                if install_result.ok:
+                    r = _wsl_run(
+                        f"git -C {shlex.quote(dest)} pull --ff-only",
+                        distro,
+                        1200,
+                    )
+            return ToolResult(
+                ok=r.returncode == 0,
+                output=json.dumps({
+                    "installed": "nuclei-templates",
+                    "destination": dest,
+                    "via": "wsl-git-pull",
+                    "stdout": r.stdout[-1000:],
+                    "stderr": r.stderr[-500:],
+                }, indent=2),
+                error=r.stderr[-500:] if r.returncode != 0 else "",
+            )
+        if _wsl_run(f"test -d {shlex.quote(dest)}", distro, 30).returncode == 0:
+            return ToolResult(ok=True, output=json.dumps({
+                "installed": "nuclei-templates",
+                "destination": dest,
+                "via": "existing-directory",
+            }, indent=2))
+        r = _wsl_run(
+            f"git clone {shlex.quote(repo)} {shlex.quote(dest)}",
+            distro,
+            1200,
+        )
+        if r.returncode != 0 and "not found" in (r.stderr or "").lower():
+            install_result = tool_install_tool("git")
+            if install_result.ok:
+                r = _wsl_run(
+                    f"git clone {shlex.quote(repo)} {shlex.quote(dest)}",
+                    distro,
+                    1200,
+                )
+        return ToolResult(
+            ok=r.returncode == 0,
+            output=json.dumps({
+                "installed": "nuclei-templates",
+                "destination": dest,
+                "via": "wsl-git-clone",
+                "stdout": r.stdout[-1000:],
+                "stderr": r.stderr[-500:],
+            }, indent=2),
+            error=r.stderr[-500:] if r.returncode != 0 else "",
+        )
+
+    if src and src.startswith(("http://", "https://", "git@", "ssh://")):
+        if not dest:
+            dest = pathlib.Path(src.rsplit("/", 1)[-1]).stem or "repo"
+        distro = _preferred_wsl_distro("git") if dest.startswith("/") else ""
+        command = f"git clone {shlex.quote(src)} {shlex.quote(dest)}"
+        if distro:
+            return tool_run_command(f"wsl -d {distro} {command}", timeout=1200)
+        try:
+            r = subprocess.run(
+                ["git", "clone", src, dest],
+                capture_output=True,
+                text=True,
+                timeout=1200,
+            )
+            return ToolResult(
+                ok=r.returncode == 0,
+                output=json.dumps({
+                    "installed": src,
+                    "destination": dest,
+                    "via": "git",
+                    "stdout": r.stdout[-1000:],
+                    "stderr": r.stderr[-500:],
+                }, indent=2),
+                error=r.stderr[-500:] if r.returncode != 0 else "",
+            )
+        except Exception as e:
+            return ToolResult(ok=False, output="", error=f"git clone failed: {e}")
+
+    if package_name:
+        return tool_install_tool(package_name)
+
+    if dest and src:
+        try:
+            src_path = pathlib.Path(src)
+            dest_path = pathlib.Path(dest)
+            if src_path.is_dir():
+                shutil.copytree(src_path, dest_path, dirs_exist_ok=True)
+            else:
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_path, dest_path)
+            return ToolResult(ok=True, output=json.dumps({
+                "installed": src,
+                "destination": dest,
+                "via": "filesystem-copy",
+            }, indent=2))
+        except Exception as e:
+            return ToolResult(ok=False, output="", error=f"filesystem copy failed: {e}")
+
+    return ToolResult(
+        ok=False,
+        output="",
+        error="install requires package, source, or destination arguments",
+    )
+
+
 def _target_to_host(target: str) -> str:
     raw = (target or "").strip()
     if not raw and STATE is not None:
@@ -1417,10 +1705,28 @@ def _sanitize_nuclei_args(extra_args: str) -> str:
 
 
 def tool_nmap(target: str = "", extra_args: str = "-sV -sC -A -Pn",
-              timeout: int = 600) -> ToolResult:
+              timeout: int = 600, ports: str = "",
+              scan_type: str = "") -> ToolResult:
     assert STATE is not None
     host = _target_to_host(target or STATE.domain)
-    command = f"nmap {extra_args.strip()} {shlex.quote(host)}".strip()
+    flags = extra_args.strip()
+    scan_map = {
+        "syn": "-sS",
+        "connect": "-sT",
+        "udp": "-sU",
+        "ack": "-sA",
+        "window": "-sW",
+        "maimon": "-sM",
+        "null": "-sN",
+        "fin": "-sF",
+        "xmas": "-sX",
+    }
+    if ports and "-p" not in flags and "--top-ports" not in flags:
+        flags = f"{flags} -p {shlex.quote(str(ports).strip())}".strip()
+    scan_key = scan_type.lower().strip()
+    if scan_key in scan_map and scan_map[scan_key] not in flags:
+        flags = f"{flags} {scan_map[scan_key]}".strip()
+    command = f"nmap {flags} {shlex.quote(host)}".strip()
     return tool_run_command(command, timeout=timeout)
 
 
@@ -1510,6 +1816,194 @@ def tool_security_headers_deep(url: str = "") -> ToolResult:
                           "security_headers", url)
 
 
+def _security_target_url(target: str = "") -> str:
+    assert STATE is not None
+    raw = (target or "").strip()
+    if not raw:
+        raw = STATE.start_url or _state_origin_url()
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    return normalize_url(raw)
+
+
+def _probe_wildcard_dns(target: str) -> Dict[str, Any]:
+    parsed = urlparse(target if "://" in target else f"https://{target}")
+    host = (parsed.hostname or target).split(":", 1)[0].strip()
+    probes = []
+    for _ in range(3):
+        subdomain = f"{uuid.uuid4().hex[:12]}.{host}"
+        try:
+            infos = socket.getaddrinfo(subdomain, 443, type=socket.SOCK_STREAM)
+            ips = sorted({
+                item[4][0] for item in infos
+                if item and item[4] and item[4][0]
+            })
+            probes.append({
+                "subdomain": subdomain,
+                "resolved": bool(ips),
+                "ips": ips[:8],
+            })
+        except Exception as e:
+            probes.append({
+                "subdomain": subdomain,
+                "resolved": False,
+                "error": str(e)[:120],
+            })
+
+    wildcard_suspected = sum(1 for p in probes if p.get("resolved")) >= 2
+    if wildcard_suspected:
+        record_finding("dns", "medium", target,
+                       f"Wildcard DNS suspected for {host}")
+    return {
+        "target": target,
+        "host": host,
+        "wildcard_suspected": wildcard_suspected,
+        "probes": probes,
+    }
+
+
+def _probe_internal_ip_leaks(target: str) -> Dict[str, Any]:
+    url = _security_target_url(target)
+    resp = http.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+    body = resp.text or ""
+    header_blob = "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
+    pattern = re.compile(
+        r"\b("
+        r"10(?:\.\d{1,3}){3}|"
+        r"127(?:\.\d{1,3}){3}|"
+        r"169\.254(?:\.\d{1,3}){2}|"
+        r"192\.168(?:\.\d{1,3}){2}|"
+        r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}"
+        r")\b"
+    )
+    matches = sorted(set(pattern.findall(body + "\n" + header_blob)))
+    if matches:
+        record_finding("info_disclosure", "medium", resp.url,
+                       f"Potential internal IP leak(s): {', '.join(matches[:6])}")
+    return {
+        "url": normalize_url(resp.url),
+        "status_code": resp.status_code,
+        "matches": matches,
+    }
+
+
+def tool_security_check(target: str = "", checks: Any = None) -> ToolResult:
+    assert STATE is not None
+    target_url = _security_target_url(target)
+    check_list: List[str] = []
+    if isinstance(checks, list):
+        check_list = [str(item).strip() for item in checks if str(item).strip()]
+    elif isinstance(checks, str):
+        check_list = [part.strip() for part in re.split(r"[,\s]+", checks) if part.strip()]
+    elif checks is not None:
+        check_list = [str(checks).strip()] if str(checks).strip() else []
+
+    if not check_list:
+        check_list = [
+            "headers",
+            "info-disclosure",
+            "wildcard-dns-detect",
+        ]
+
+    results: List[Dict[str, Any]] = []
+    for raw_check in check_list:
+        check = _canonical_tool_name(raw_check)
+        label = raw_check.strip()
+        result_payload: Dict[str, Any] = {"check": label}
+        try:
+            if check in {"wildcard_dns_detect", "wildcard_dns", "dns_wildcard"}:
+                payload = _probe_wildcard_dns(target_url)
+                result_payload.update({"ok": True, "data": payload})
+            elif check in {"misconfigured_server", "server_misconfiguration"}:
+                headers = tool_check_headers(target_url)
+                headers_payload = json.loads(headers.output) if headers.output else {}
+                deep = tool_security_headers_deep(target_url)
+                deep_payload = json.loads(deep.output) if deep.output else {}
+                info = tool_security_info_disclosure(target_url)
+                info_payload = json.loads(info.output) if info.output else {}
+                result_payload.update({
+                    "ok": headers.ok and deep.ok and info.ok,
+                    "data": {
+                        "headers": headers_payload,
+                        "deep_headers": deep_payload,
+                        "info_disclosure": info_payload,
+                    },
+                })
+            elif check in {"exposed_internal_ip", "internal_ip_leak", "internal_ip"}:
+                payload = _probe_internal_ip_leaks(target_url)
+                result_payload.update({"ok": True, "data": payload})
+            elif check in {"headers", "security_headers"}:
+                tool_result = tool_check_headers(target_url)
+                result_payload.update({
+                    "ok": tool_result.ok,
+                    "data": json.loads(tool_result.output) if tool_result.output else {},
+                })
+            elif check in {"info_disclosure", "information_disclosure"}:
+                tool_result = tool_security_info_disclosure(target_url)
+                result_payload.update({
+                    "ok": tool_result.ok,
+                    "data": json.loads(tool_result.output) if tool_result.output else {},
+                })
+            elif check in {"ssl", "tls"}:
+                parsed = urlparse(target_url)
+                host = parsed.hostname or STATE.domain
+                port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                tool_result = _wrap_security(check_ssl(host, port), "ssl", target_url)
+                result_payload.update({
+                    "ok": tool_result.ok,
+                    "data": json.loads(tool_result.output) if tool_result.output else {},
+                })
+            elif check in {"cookies", "cookie"}:
+                tool_result = tool_security_cookies(target_url)
+                result_payload.update({
+                    "ok": tool_result.ok,
+                    "data": json.loads(tool_result.output) if tool_result.output else {},
+                })
+            elif check in {"cors"}:
+                tool_result = tool_security_cors(target_url)
+                result_payload.update({
+                    "ok": tool_result.ok,
+                    "data": json.loads(tool_result.output) if tool_result.output else {},
+                })
+            elif check in {"mixed_content", "mixedcontent"}:
+                tool_result = tool_security_mixed_content()
+                result_payload.update({
+                    "ok": tool_result.ok,
+                    "data": json.loads(tool_result.output) if tool_result.output else {},
+                })
+            elif check in {"email", "spf_dmarc", "email_security"}:
+                parsed = urlparse(target_url)
+                host = parsed.hostname or STATE.domain
+                tool_result = _wrap_security(check_email_security(host),
+                                             "email_security", host)
+                result_payload.update({
+                    "ok": tool_result.ok,
+                    "data": json.loads(tool_result.output) if tool_result.output else {},
+                })
+            else:
+                fallback = tool_check_headers(target_url)
+                result_payload.update({
+                    "ok": fallback.ok,
+                    "data": {
+                        "fallback": "headers",
+                        "result": json.loads(fallback.output) if fallback.output else {},
+                    },
+                })
+        except Exception as e:
+            result_payload.update({"ok": False, "error": str(e)})
+        results.append(result_payload)
+
+    overall_ok = any(item.get("ok") for item in results)
+    return ToolResult(
+        ok=overall_ok,
+        output=json.dumps({
+            "target": target_url,
+            "requested_checks": check_list,
+            "results": results,
+        }, indent=2),
+    )
+
+
 # ═══════════════════════════════════════════════════════════
 #  REPORT GENERATION TOOLS
 # ═══════════════════════════════════════════════════════════
@@ -1519,6 +2013,23 @@ def tool_write_json_report(path: str = "") -> ToolResult:
     with open(p, "w", encoding="utf-8") as f:
         json.dump(STATE.to_dict(), f, indent=2)
     return ToolResult(ok=True, output=json.dumps({"written": p}))
+
+
+def tool_write_report() -> ToolResult:
+    assert STATE is not None
+    json_result = tool_write_json_report()
+    md_result = tool_write_markdown_summary()
+    return ToolResult(ok=json_result.ok and md_result.ok,
+                      output=json.dumps({
+                          "json_report": json.loads(json_result.output)
+                          if json_result.output else {},
+                          "markdown_report": json.loads(md_result.output)
+                          if md_result.output else {},
+                      }, indent=2),
+                      error="; ".join(
+                          part for part in [json_result.error, md_result.error]
+                          if part
+                      ))
 
 
 def tool_write_markdown_summary(path: str = "") -> ToolResult:
@@ -1551,6 +2062,10 @@ def tool_write_markdown_summary(path: str = "") -> ToolResult:
     return ToolResult(ok=True, output=json.dumps({"written": p}))
 
 
+def tool_write_markdown_report() -> ToolResult:
+    return tool_write_markdown_summary()
+
+
 # ═══════════════════════════════════════════════════════════
 #  LLM ORCHESTRATION
 # ═══════════════════════════════════════════════════════════
@@ -1577,6 +2092,9 @@ TOOL_DESCRIPTIONS = {
     "nmap": "Run Nmap via WSL. args: {target, extra_args, timeout}",
     "nuclei": "Run Nuclei via WSL. args: {url, extra_args, timeout}",
     "sqlmap": "Run SQLMap against a URL. args: {url, extra_args, timeout}",
+    "install": "Generic installer/deployer. args: {package, destination, source}",
+    "site_map": "Snapshot of discovered site map and scan state. no args",
+    "security-check": "Generic security check dispatcher. args: {target, checks}",
     "run_command": "Execute ANY shell command freely. args: {command, timeout}",
     "install_tool": "Install a security tool (nmap,nuclei,sqlmap,etc). args: {tool_name}",
     "ask_user": "Ask the operator a question (for risky/unclear decisions). args: {question}",
@@ -1586,7 +2104,9 @@ TOOL_DESCRIPTIONS = {
     "lighthouse_audit": "Lighthouse perf/a11y/SEO audit. args: {url}",
     # Status & reporting
     "site_snapshot": "Overview of audit progress. no args",
+    "write_report": "Write both JSON and markdown reports. no args",
     "write_json_report": "Write JSON report. no args",
+    "write_markdown_report": "Write markdown report. alias of summary writer. no args",
     "write_markdown_summary": "Write markdown summary. no args",
 }
 
@@ -2046,14 +2566,17 @@ def network_kickoff(registry: ToolRegistry) -> None:
 
     # Host discovery via nmap ping sweep (prefer WSL)
     if _WSL_DISTROS:
-        distro = _preferred_wsl_distro()
-        steps.append(("run_command", {
-            "command": f"wsl -d {distro} nmap -sn {target} -oG -",
+        # Use the proxy tool so the agent keeps the scan inside WSL with
+        # normalized targets and error recovery.
+        steps.append(("nmap", {
+            "target": target,
+            "extra_args": "-sn -n -PE -PS22,80,443",
             "timeout": 120,
         }))
-        # Quick service scan on common ports
-        steps.append(("run_command", {
-            "command": f"wsl -d {distro} nmap -sV --top-ports 100 -T4 {target} -oN -",
+        # Quick service scan on common ports.
+        steps.append(("nmap", {
+            "target": target,
+            "extra_args": "-sV --top-ports 100 -T4 -Pn",
             "timeout": 300,
         }))
     else:
@@ -2070,7 +2593,13 @@ def _run_kickoff_steps(steps: List[Tuple[str, Dict[str, Any]]],
     """Execute deterministic kickoff steps with UI output."""
     for tool_name, args in steps:
         result = registry.call(tool_name, **args)
-        detail = args.get("url", "")
+        detail = (
+            args.get("url", "")
+            or args.get("target", "")
+            or args.get("package", "")
+            or args.get("source", "")
+            or args.get("destination", "")
+        )
         summary = ""
         if result.ok:
             try:
@@ -2167,6 +2696,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
     registry.register("sqlmap", tool_sqlmap)
     registry.register("run", tool_run_command)
     registry.register("run_command", tool_run_command)
+    registry.register("install", tool_install)
     registry.register("install_tool", tool_install_tool)
     registry.register("ask_user", tool_ask_user)
     # Browser & lighthouse
@@ -2175,7 +2705,11 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
     registry.register("lighthouse_audit", tool_lighthouse_audit)
     # Status & reporting
     registry.register("site_snapshot", lambda: tool_site_snapshot())
+    registry.register("site_map", tool_site_map)
+    registry.register("security_check", tool_security_check)
+    registry.register("write_report", tool_write_report)
     registry.register("write_json_report", tool_write_json_report)
+    registry.register("write_markdown_report", tool_write_markdown_report)
     registry.register("write_markdown_summary", tool_write_markdown_summary)
 
     # Deterministic kickoff
@@ -2266,7 +2800,14 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
                 else:
                     summary = result.error[:80]
 
-                ui_tool(tool_name, args.get("url", ""),
+                detail = (
+                    args.get("url", "")
+                    or args.get("target", "")
+                    or args.get("package", "")
+                    or args.get("source", "")
+                    or args.get("destination", "")
+                )
+                ui_tool(tool_name, detail,
                         result.ok, result.duration_s, summary)
 
                 STATE.recent_events.append({
