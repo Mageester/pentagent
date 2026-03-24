@@ -390,7 +390,7 @@ def ui_banner(domain: str, profile: str = "standard") -> None:
     if STATE is not None and getattr(STATE, "target_profile", "").strip():
         lines.append(f"[dim]Target Type:[/] [bold]{STATE.target_profile}[/]")
     if STATE is not None and getattr(STATE, "operator_task", "").strip():
-        lines.append(f"[dim]Task:[/]     [bold]{compact_text(STATE.operator_task, 140)}[/]")
+        lines.append(f"[dim]Mission:[/]  [bold]{compact_text(STATE.operator_task, 140)}[/]")
     lines.extend([
         "",
         f"  [green]✔[/] Ollama   {pw_icon} Playwright   {lh_icon} Lighthouse",
@@ -501,7 +501,7 @@ def ui_dashboard(state: "AgentState") -> None:
         grid.add_row(
             f"[bold green]Steps[/]  {state.step}/{MAX_STEPS}",
             f"[dim]Mode[/]  network",
-            f"[dim]Task[/]  {task or 'none'}",
+            f"[dim]Mission[/]  {task or 'none'}",
         )
         grid.add_row(
             f"[dim]Profile[/]  {target_profile}",
@@ -526,7 +526,7 @@ def ui_dashboard(state: "AgentState") -> None:
         )
         grid.add_row(
             f"[dim]Profile[/]  {target_profile}",
-            f"[dim]Task[/]  {task or 'none'}",
+            f"[dim]Mission[/]  {task or 'none'}",
             f"[dim]Graph[/]  {graph_summary['nodes']}n/{graph_summary['edges']}e",
         )
         grid.add_row(
@@ -4305,7 +4305,7 @@ def tool_write_markdown_summary(path: str = "") -> ToolResult:
     lines.append("## Executive Summary")
     lines.append(f"- Target profile: {target_profile}.")
     if getattr(STATE, "operator_task", "").strip():
-        lines.append("- Operator task focus:")
+        lines.append("- Operator mission:")
         for item in _operator_task_items():
             lines.append(f"  - {item}")
     if findings:
@@ -4601,7 +4601,7 @@ def tool_write_html_report(path: str = "") -> ToolResult:
         )
     if getattr(STATE, "operator_task", "").strip():
         operator_task_html = (
-            '<section class="section"><h2>Operator Task</h2><pre class="json">'
+            '<section class="section"><h2>Operator Mission</h2><pre class="json">'
             f"{html_escape(STATE.operator_task.strip())}</pre></section>"
         )
     else:
@@ -5029,10 +5029,10 @@ def build_system_prompt() -> str:
     if task_block:
         task_prompt = f"""
 
-Operator-assigned task focus:
+Operator mission:
 {task_block}
 
-Prioritize these tasks before broad exploration. Treat them as the highest-value objectives for this run."""
+Treat this as the primary objective for the run. Break it into subgoals, use any authorized tool or pivot that helps, and pursue the highest-value path first."""
     universal_directive = _build_universal_pentest_directive("web")
     wsl_info = ""
     if _WSL_DISTROS:
@@ -5471,7 +5471,7 @@ def summarize_memory() -> None:
     if getattr(STATE, "target_profile", "").strip():
         lines.append(f"Target profile: {STATE.target_profile}")
     if getattr(STATE, "operator_task", "").strip():
-        lines.append("Operator task focus:")
+        lines.append("Operator mission:")
         for item in _operator_task_items():
             lines.append(f"- {item}")
     lines.append(f"Pages seen: {len(STATE.pages)}")
@@ -5580,7 +5580,7 @@ def bootstrap_state(domain: str, mode: str = "web",
     raw = domain.strip()
     domain = _normalize_scope_target(raw, mode)
     task_text = (operator_task or "").strip()
-    task_suffix = f"\nOperator task focus: {task_text}" if task_text else ""
+    task_suffix = f"\nOperator mission: {task_text}" if task_text else ""
     if mode == "network":
         return AgentState(
             session_id=str(uuid.uuid4()),
@@ -5699,10 +5699,10 @@ def build_network_system_prompt() -> str:
     if task_block:
         task_prompt = f"""
 
-Operator-assigned task focus:
+Operator mission:
 {task_block}
 
-Prioritize these tasks before broad discovery. Treat them as the highest-value objectives for this run."""
+Treat this as the primary objective for the run. Break it into subgoals, use any authorized tool or pivot that helps, and pursue the highest-value path first."""
     universal_directive = _build_universal_pentest_directive("network")
     wsl_info = ""
     if _WSL_DISTROS:
@@ -5872,7 +5872,7 @@ def network_kickoff(registry: ToolRegistry) -> None:
         STATE.network_subnets = targets
         STATE.domain = targets[0]
         task_suffix = (
-            f"\nOperator task focus: {STATE.operator_task.strip()}"
+            f"\nOperator mission: {STATE.operator_task.strip()}"
             if getattr(STATE, "operator_task", "").strip()
             else ""
         )
@@ -5883,7 +5883,7 @@ def network_kickoff(registry: ToolRegistry) -> None:
         targets = [STATE.domain]
         STATE.network_subnets = targets
         task_suffix = (
-            f"\nOperator task focus: {STATE.operator_task.strip()}"
+            f"\nOperator mission: {STATE.operator_task.strip()}"
             if getattr(STATE, "operator_task", "").strip()
             else ""
         )
@@ -6071,7 +6071,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
             )
         else:
             console.print(
-                "[bold yellow]Checkpoint does not match requested target, mode, or task focus; "
+                "[bold yellow]Checkpoint does not match requested target, mode, or mission; "
                 "starting a fresh session.[/]"
             )
             STATE = bootstrap_state(domain, mode=run_mode, operator_task=task_text)
@@ -6373,7 +6373,7 @@ def interactive_startup() -> Tuple[str, str, str, bool, str, str]:
         default="standard",
     )
     task = Prompt.ask(
-        "[bold]Specific task focus[/] [dim](optional; separate multiple items with semicolons)[/]",
+        "[bold]Operator mission[/] [dim](optional; broad authorized objective; separate multiple items with semicolons)[/]",
         default="",
     ).strip()
     fresh = not Confirm.ask(
@@ -6414,11 +6414,11 @@ if __name__ == "__main__":
         elif arg.startswith("--model="):
             _model = arg.split("=", 1)[1]
             _cli = True
-        elif arg == "--task" and i + 1 < len(_args):
+        elif arg in {"--task", "--mission", "--objective"} and i + 1 < len(_args):
             _task = _args[i + 1]
             _cli = True
             i += 1
-        elif arg.startswith("--task="):
+        elif arg.startswith("--task=") or arg.startswith("--mission=") or arg.startswith("--objective="):
             _task = arg.split("=", 1)[1]
             _cli = True
         elif not arg.startswith("-"):

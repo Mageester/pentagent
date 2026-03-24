@@ -29,6 +29,7 @@ The agent operates as an intelligent decision loop: it runs reconnaissance, anal
 | **Lighthouse Integration** | Performance, accessibility, SEO, and best practices scoring |
 | **Persistent State** | Checkpoint/resume support — interrupt and continue assessments |
 | **Attack-Graph Memory** | Tracks discovered surfaces, findings, confidence, and pivots across the run |
+| **Operator Mission Setting** | Set a broad custom mission at launch and let the agent choose the best authorized pivots |
 | **Rich Terminal UI** | ASCII art banner, live progress, structured tool output, dashboards |
 | **Structured Reporting** | Machine-readable JSON + markdown + HTML reports with detailed findings |
 | **Release Notes UI** | Polished browser-readable changelog page with release highlights and operator guidance |
@@ -116,7 +117,7 @@ python agent.py
 Presents an interactive menu:
 - Target domain input
 - Scan profile selection (quick / standard / deep)
-- Optional operator task focus for specific work you want prioritized
+- Optional operator mission for broad authorized work you want prioritized
 - Resume/fresh session choice
 
 ### CLI Mode
@@ -125,10 +126,12 @@ Presents an interactive menu:
 python agent.py example.com              # target specific domain
 python agent.py example.com --fresh      # start fresh (ignore checkpoint)
 python agent.py --resume                 # resume previous session
-python agent.py example.com --task "find IDORs in profile endpoints; map admin panels"
+python agent.py example.com --mission "find IDORs in profile endpoints; map admin panels"
+python agent.py example.com --objective "map attack surface and validate auth/session flaws"
 ```
 
-You can also enter a task focus interactively. Separate multiple tasks with semicolons.
+You can also enter a mission interactively. Separate multiple mission items with semicolons.
+The startup parser accepts `--mission`, `--objective`, or the legacy `--task` alias.
 
 ### Scan Profiles
 
