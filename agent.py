@@ -86,9 +86,10 @@ def _bootstrap_playwright() -> str:
     try:
         r = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=300,
         )
-        return "ok" if r.returncode == 0 else f"warn: {r.stderr[:100]}"
+        return "ok" if r.returncode == 0 else f"warn: {(r.stderr or '')[:100]}"
     except Exception as e:
         return f"fail: {e}"
 
@@ -99,7 +100,8 @@ def _bootstrap_lighthouse() -> Tuple[bool, str]:
     try:
         r = subprocess.run(
             ["npx", "--yes", "lighthouse", "--version"],
-            capture_output=True, text=True, timeout=90,
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=90,
         )
         if r.returncode == 0:
             return True, f"v{r.stdout.strip()}"
@@ -111,7 +113,8 @@ def _bootstrap_lighthouse() -> Tuple[bool, str]:
 def _bootstrap_ollama(model: str) -> Tuple[bool, str]:
     try:
         r = subprocess.run(
-            ["ollama", "--version"], capture_output=True, text=True, timeout=10,
+            ["ollama", "--version"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=10,
         )
         if r.returncode != 0:
             return False, "ollama --version failed"
@@ -124,7 +127,8 @@ def _bootstrap_ollama(model: str) -> Tuple[bool, str]:
     except Exception:
         return False, "API unreachable at 127.0.0.1:11434"
     r2 = subprocess.run(
-        ["ollama", "list"], capture_output=True, text=True, timeout=15,
+        ["ollama", "list"], capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=15,
     )
     installed_models = {
         line.split()[0]
@@ -166,7 +170,8 @@ def _bootstrap_lighthouse_runtime() -> Tuple[bool, str]:
         try:
             r = subprocess.run(
                 [local_npx, "--yes", "lighthouse", "--version"],
-                capture_output=True, text=True, timeout=90,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=90,
             )
             if r.returncode == 0:
                 return True, f"local v{r.stdout.strip()}"
@@ -180,7 +185,8 @@ def _bootstrap_lighthouse_runtime() -> Tuple[bool, str]:
                     "wsl", "-d", distro, "-u", "root", "bash", "-lc",
                     "command -v npx >/dev/null 2>&1 && command -v node >/dev/null 2>&1",
                 ],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=15,
             )
             if r.returncode == 0:
                 return True, f"wsl:{distro}"
@@ -626,6 +632,8 @@ def _canonical_tool_name(name: str) -> str:
 
 def record_finding(kind: str, severity: str, url: str, detail: str) -> None:
     assert STATE is not None
+    kind = _normalized_finding_kind(kind)
+    severity = (severity or "").strip().lower() or "info"
     STATE.findings.append(
         {"kind": kind, "severity": severity, "url": url, "detail": detail}
     )
@@ -1464,12 +1472,13 @@ def tool_lighthouse_audit(url: str) -> ToolResult:
                 ]
                 r = subprocess.run(
                     cmd,
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=120,
                     env=local_env,
                 )
                 if r.returncode == 0 and out_path.exists():
                     return _load_report("local")
-                local_error = f"Lighthouse exit {r.returncode}: {r.stderr[:200]}"
+                local_error = f"Lighthouse exit {r.returncode}: {(r.stderr or '')[:200]}"
             finally:
                 if browser_proc is not None:
                     try:
@@ -1540,10 +1549,10 @@ def tool_lighthouse_audit(url: str) -> ToolResult:
                 return ToolResult(
                     ok=False,
                     output="",
-                    error=f"{local_error}; Lighthouse exit {r.returncode}: {r.stderr[:200]}",
+                    error=f"{local_error}; Lighthouse exit {r.returncode}: {(r.stderr or '')[:200]}",
                 )
             return ToolResult(ok=False, output="",
-                              error=f"Lighthouse exit {r.returncode}: {r.stderr[:200]}")
+                              error=f"Lighthouse exit {r.returncode}: {(r.stderr or '')[:200]}")
         except subprocess.TimeoutExpired:
             return ToolResult(ok=False, output="",
                               error="Lighthouse timed out (150s)")
@@ -1666,6 +1675,8 @@ def _wsl_tool_available(distro: str, tool_name: str) -> bool:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=15,
             )
             cached[candidate] = r.returncode == 0
@@ -1774,6 +1785,8 @@ def _wsl_run(command: str, distro: str, timeout: int,
         wsl_args,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         cwd=str(OUTPUT_DIR),
     )
@@ -1806,6 +1819,8 @@ def _install_tool_in_wsl(tool_name: str) -> ToolResult:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=1800,
             )
             if r.returncode == 0:
@@ -1859,6 +1874,7 @@ def tool_run_command(command: str, timeout: int = 120) -> ToolResult:
         else:
             r = subprocess.run(
                 command, shell=True, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
                 timeout=timeout, cwd=str(OUTPUT_DIR),
             )
 
@@ -1899,14 +1915,20 @@ def tool_run_command(command: str, timeout: int = 120) -> ToolResult:
                         )
                         r = subprocess.run(
                             command, shell=True, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace",
                             timeout=timeout, cwd=str(OUTPUT_DIR),
                         )
 
-        stdout = r.stdout[-4000:] if len(r.stdout) > 4000 else r.stdout
-        stderr = r.stderr[-2000:] if len(r.stderr) > 2000 else r.stderr
+        stdout_text = r.stdout or ""
+        stderr_text = r.stderr or ""
+        stdout = stdout_text[-4000:] if len(stdout_text) > 4000 else stdout_text
+        stderr = stderr_text[-2000:] if len(stderr_text) > 2000 else stderr_text
         # Log full output
         with open(log_path, "w", encoding="utf-8") as f:
-            f.write(f"$ {command}\n\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}\n")
+            f.write(
+                f"$ {command}\n\n--- stdout ---\n{stdout_text}"
+                f"\n--- stderr ---\n{stderr_text}\n"
+            )
         return ToolResult(ok=r.returncode == 0, output=json.dumps({
             "command": command, "returncode": r.returncode,
             "stdout": stdout, "stderr": stderr, "log": str(log_path),
@@ -1964,6 +1986,8 @@ def tool_install_tool(tool_name: str) -> ToolResult:
                         ],
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         timeout=1800,
                     )
                     if r.returncode == 0:
@@ -1972,7 +1996,7 @@ def tool_install_tool(tool_name: str) -> ToolResult:
                             "installed": "lighthouse",
                             "via": "wsl-node",
                             "distro": distro,
-                            "output": r.stdout[-500:],
+                            "output": (r.stdout or "")[-500:],
                         }, indent=2))
                 except Exception as e:
                     pass
@@ -1986,6 +2010,8 @@ def tool_install_tool(tool_name: str) -> ToolResult:
                     ],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=1800,
                 )
                 if r.returncode == 0:
@@ -1993,7 +2019,7 @@ def tool_install_tool(tool_name: str) -> ToolResult:
                     return ToolResult(ok=True, output=json.dumps({
                         "installed": "lighthouse",
                         "via": "winget-node",
-                        "output": r.stdout[-500:],
+                        "output": (r.stdout or "")[-500:],
                     }, indent=2))
             except Exception as e:
                 return ToolResult(ok=False, output="", error=f"winget install failed: {e}")
@@ -2037,11 +2063,13 @@ def tool_install_tool(tool_name: str) -> ToolResult:
             r = subprocess.run(
                 ["winget", "install", "--id", winget_tools[tool_key],
                  "--accept-package-agreements", "--accept-source-agreements", "-e"],
-                capture_output=True, text=True, timeout=300,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=300,
             )
             return ToolResult(ok=r.returncode == 0, output=json.dumps({
-                "installed": tool_key, "via": "winget", "output": r.stdout[-500:]
-            }), error=r.stderr[-300:] if r.returncode != 0 else "")
+                "installed": tool_key, "via": "winget",
+                "output": (r.stdout or "")[-500:]
+            }), error=(r.stderr or "")[-300:] if r.returncode != 0 else "")
         except Exception as e:
             return ToolResult(ok=False, output="", error=f"winget install failed: {e}")
 
@@ -2093,10 +2121,10 @@ def tool_install(package: str = "", destination: str = "",
                     "installed": "nuclei-templates",
                     "destination": dest,
                     "via": "wsl-git-pull",
-                    "stdout": r.stdout[-1000:],
-                    "stderr": r.stderr[-500:],
+                    "stdout": (r.stdout or "")[-1000:],
+                    "stderr": (r.stderr or "")[-500:],
                 }, indent=2),
-                error=r.stderr[-500:] if r.returncode != 0 else "",
+                error=(r.stderr or "")[-500:] if r.returncode != 0 else "",
             )
         if _wsl_run(f"test -d {shlex.quote(dest)}", distro, 30).returncode == 0:
             return ToolResult(ok=True, output=json.dumps({
@@ -2123,10 +2151,10 @@ def tool_install(package: str = "", destination: str = "",
                 "installed": "nuclei-templates",
                 "destination": dest,
                 "via": "wsl-git-clone",
-                "stdout": r.stdout[-1000:],
-                "stderr": r.stderr[-500:],
+                "stdout": (r.stdout or "")[-1000:],
+                "stderr": (r.stderr or "")[-500:],
             }, indent=2),
-            error=r.stderr[-500:] if r.returncode != 0 else "",
+            error=(r.stderr or "")[-500:] if r.returncode != 0 else "",
         )
 
     if src and src.startswith(("http://", "https://", "git@", "ssh://")):
@@ -2141,6 +2169,8 @@ def tool_install(package: str = "", destination: str = "",
                 ["git", "clone", src, dest],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=1200,
             )
             return ToolResult(
@@ -2149,10 +2179,10 @@ def tool_install(package: str = "", destination: str = "",
                     "installed": src,
                     "destination": dest,
                     "via": "git",
-                    "stdout": r.stdout[-1000:],
-                    "stderr": r.stderr[-500:],
+                    "stdout": (r.stdout or "")[-1000:],
+                    "stderr": (r.stderr or "")[-500:],
                 }, indent=2),
-                error=r.stderr[-500:] if r.returncode != 0 else "",
+                error=(r.stderr or "")[-500:] if r.returncode != 0 else "",
             )
         except Exception as e:
             return ToolResult(ok=False, output="", error=f"git clone failed: {e}")
@@ -3616,7 +3646,8 @@ def _detect_local_subnets() -> List[str]:
     try:
         r = subprocess.run(
             ["ipconfig"] if os.name == "nt" else ["ip", "addr"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=10,
         )
         # Find IPv4 addresses and masks
         import re as _re
