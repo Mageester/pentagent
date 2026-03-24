@@ -293,7 +293,7 @@ MAX_STEPS = 50
 REQUEST_TIMEOUT = 20
 MAX_EVENT_CHARS = 3000
 BOOTSTRAP_BATCH = 6
-COMMAND_TIMEOUT = 300
+COMMAND_TIMEOUT = 900
 
 SCAN_PROFILES = {
     "quick":    {"max_steps": 20, "batch": 4, "broken_sample": 30},
@@ -577,6 +577,29 @@ class ToolRegistry:
                             output="",
                             error=f"Missing required args for {name}: {', '.join(missing)}",
                         )
+                for p in params:
+                    if p.name not in kwargs:
+                        continue
+                    value = kwargs[p.name]
+                    annotation = p.annotation
+                    if isinstance(value, str):
+                        text = value.strip()
+                        if not text:
+                            continue
+                        looks_float = re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text) is not None
+                        ann_text = str(annotation).lower()
+                        if annotation in {int, "int"} or "int" in ann_text:
+                            if looks_float:
+                                kwargs[p.name] = int(float(text))
+                        elif annotation in {float, "float"} or "float" in ann_text:
+                            if looks_float:
+                                kwargs[p.name] = float(text)
+                        elif annotation in {bool, "bool"} or "bool" in ann_text:
+                            lowered = text.lower()
+                            if lowered in {"1", "true", "yes", "y", "on"}:
+                                kwargs[p.name] = True
+                            elif lowered in {"0", "false", "no", "n", "off"}:
+                                kwargs[p.name] = False
             except (TypeError, ValueError):
                 pass
 
@@ -624,6 +647,15 @@ def same_domain(url: str, domain: str) -> bool:
 
 def compact_text(text: str, max_len: int = 300) -> str:
     return re.sub(r"\s+", " ", text or "").strip()[:max_len]
+
+
+def _coerce_int_value(value: Any, default: int) -> int:
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        return max(int(float(str(value).strip())), 1)
+    except Exception:
+        return default
 
 
 def _canonical_tool_name(name: str) -> str:
@@ -1427,6 +1459,14 @@ def tool_lighthouse_audit(url: str) -> ToolResult:
             })
             chrome_path = _playwright_chromium_path()
             if not chrome_path:
+                for candidate in (
+                    "chromium", "chromium-browser", "chrome",
+                    "google-chrome", "google-chrome-stable",
+                ):
+                    chrome_path = shutil.which(candidate) or ""
+                    if chrome_path:
+                        break
+            if not chrome_path:
                 raise FileNotFoundError("No Chromium executable available for Lighthouse")
             import socket as _socket
             import urllib.request as _urlrequest
@@ -1518,6 +1558,17 @@ def tool_lighthouse_audit(url: str) -> ToolResult:
                 break
         except Exception:
             continue
+    if not chrome_path:
+        chromium_install = tool_install_tool("chromium")
+        if chromium_install.ok:
+            for candidate in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
+                try:
+                    probe = _wsl_run(f"command -v {candidate}", distro, 15, user="root")
+                    if probe.returncode == 0 and probe.stdout.strip():
+                        chrome_path = probe.stdout.strip().splitlines()[-1].strip()
+                        break
+                except Exception:
+                    continue
     command = (
         f"npx --yes lighthouse {shlex.quote(url)} "
         f"--output=json --output-path={shlex.quote(out_path_wsl)} "
@@ -1714,6 +1765,24 @@ def _command_entrypoint(command: str) -> str:
     return parts[idx] if idx < len(parts) else ""
 
 
+def _command_timeout_floor(command: str) -> int:
+    parsed = _parse_wsl_command(command)
+    if parsed is not None:
+        _, inner_command, _ = parsed
+        entrypoint = _command_entrypoint(inner_command).lower().rstrip(".exe")
+    else:
+        entrypoint = _command_entrypoint(command).lower().rstrip(".exe")
+    return {
+        "nmap": 300,
+        "nuclei": 300,
+        "sqlmap": 600,
+        "lighthouse": 180,
+        "nikto": 180,
+        "gobuster": 180,
+        "feroxbuster": 180,
+    }.get(entrypoint, 0)
+
+
 def _shell_join(tokens: List[str]) -> str:
     specials = {"&&", "||", "|", ";", "&", ">", ">>", "<", "(", ")"}
     pieces = []
@@ -1853,6 +1922,8 @@ def tool_run_command(command: str, timeout: int = 120) -> ToolResult:
         console.print(f"\n  [bold red]⚠ RISKY COMMAND EXECUTION APPROVED (AUTO):[/]")
         console.print(f"  [yellow]{command}[/]")
 
+    timeout = _coerce_int_value(timeout, 120)
+    timeout = max(timeout, _command_timeout_floor(command))
     timeout = min(timeout, COMMAND_TIMEOUT)
     log_path = SCAN_LOGS_DIR / f"cmd_{time.time_ns()}_{uuid.uuid4().hex[:8]}.txt"
     try:
@@ -2233,7 +2304,11 @@ def _sanitize_nuclei_args(extra_args: str) -> str:
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if tok in {"-u", "--url", "--config", "--remote-template-domain"}:
+        if tok in {"-validate", "--validate"}:
+            i += 1
+            continue
+        if tok in {"-u", "--url", "--config", "--remote-template-domain",
+                   "--template-id", "-o", "--output"}:
             i += 2 if i + 1 < len(tokens) else 1
             continue
         if tok in {"-t", "--templates"}:
@@ -2247,8 +2322,9 @@ def _sanitize_nuclei_args(extra_args: str) -> str:
                 ):
                     i += 2
                     continue
-            if i + 1 < len(tokens):
-                cleaned.extend([tok, tokens[i + 1]])
+                normalized = _normalize_nuclei_template_value(tmpl)
+                if normalized:
+                    cleaned.extend([tok, normalized])
                 i += 2
                 continue
             i += 1
@@ -2256,6 +2332,77 @@ def _sanitize_nuclei_args(extra_args: str) -> str:
         cleaned.append(tok)
         i += 1
     return " ".join(cleaned).strip()
+
+
+def _normalize_nuclei_template_value(value: str) -> str:
+    template_dir = "/usr/local/share/nuclei-templates"
+    raw = (value or "").strip().strip('"').strip("'")
+    if not raw:
+        return template_dir
+    if raw.lower() == "all":
+        return template_dir
+    if raw.startswith(("http://", "https://")) or "raw.githubusercontent.com" in raw:
+        return ""
+    if "config/techniques" in raw:
+        return ""
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if not parts:
+        return template_dir
+    valid_parts = []
+    for part in parts:
+        if part.startswith(("http://", "https://")) or "raw.githubusercontent.com" in part:
+            continue
+        if "config/techniques" in part:
+            continue
+        if pathlib.Path(part).exists():
+            valid_parts.append(part)
+    if valid_parts:
+        return ",".join(valid_parts)
+    if raw.endswith("/all") or raw.endswith("\\all"):
+        return template_dir
+    return template_dir
+
+
+_NUCLEI_FINDING_KIND_MAP = {
+    "http-missing-security-headers": "security_headers",
+    "missing-sri": "security_headers",
+    "robots-txt": "crawl",
+    "robots-txt-endpoint": "crawl",
+    "dns-waf-detect": "fingerprint",
+    "waf-detect": "fingerprint",
+    "tls-version": "ssl",
+    "ssl-issuer": "ssl",
+    "ssl-dns-names": "ssl",
+    "spf-record-detect": "email_security",
+    "dmarc-detect": "email_security",
+    "dkim-record-detect": "email_security",
+    "caa-fingerprint": "dns",
+    "mx-fingerprint": "dns",
+    "nameserver-fingerprint": "dns",
+    "rdap-whois": "fingerprint",
+}
+
+
+def _record_nuclei_findings(target: str, nuclei_output: str) -> None:
+    pattern = re.compile(
+        r"^\[(?P<name>[^\]]+)\]\s+\[[^\]]+\]\s+\[(?P<severity>[^\]]+)\]\s+(?P<rest>.+)$"
+    )
+    seen: Set[Tuple[str, str, str, str]] = set()
+    for line in (nuclei_output or "").splitlines():
+        match = pattern.match(line.strip())
+        if not match:
+            continue
+        severity = match.group("severity").strip().lower()
+        if severity not in {"low", "medium", "high", "critical"}:
+            continue
+        template = match.group("name").split(":", 1)[0].strip().lower()
+        kind = _NUCLEI_FINDING_KIND_MAP.get(template, "nuclei")
+        detail = compact_text(line, 240)
+        key = (kind, severity, target, detail)
+        if key in seen:
+            continue
+        seen.add(key)
+        record_finding(kind, severity, target, detail)
 
 
 def _sanitize_whatweb_args(extra_args: str) -> str:
@@ -2305,6 +2452,7 @@ def tool_nmap(target: str = "", extra_args: str = "-sV -sC -A -Pn",
               scan_type: str = "") -> ToolResult:
     assert STATE is not None
     host = _target_to_host(target or STATE.domain)
+    timeout = _coerce_int_value(timeout, 600)
     flags = extra_args.strip()
     scan_map = {
         "syn": "-sS",
@@ -2322,6 +2470,8 @@ def tool_nmap(target: str = "", extra_args: str = "-sV -sC -A -Pn",
     scan_key = scan_type.lower().strip()
     if scan_key in scan_map and scan_map[scan_key] not in flags:
         flags = f"{flags} {scan_map[scan_key]}".strip()
+    if "-Pn" not in flags and "-sn" not in flags:
+        flags = f"{flags} -Pn".strip()
     command = f"nmap {flags} {shlex.quote(host)}".strip()
     result = tool_run_command(command, timeout=timeout)
     text = _tool_result_text(result).lower()
@@ -2347,7 +2497,10 @@ def tool_nuclei(url: str = "", extra_args: str = "-timeout 5 -retries 1 -rate-li
                 timeout: int = 600) -> ToolResult:
     assert STATE is not None
     target = normalize_url(url or STATE.start_url)
+    timeout = _coerce_int_value(timeout, 600)
     sanitized = _sanitize_nuclei_args(extra_args)
+    if "-t" not in sanitized and "--templates" not in sanitized:
+        sanitized = f"-t /usr/local/share/nuclei-templates {sanitized}".strip()
     command = f"nuclei -u {shlex.quote(target)} {sanitized}".strip()
     result = tool_run_command(command, timeout=timeout)
     text = _tool_result_text(result).lower()
@@ -2361,7 +2514,7 @@ def tool_nuclei(url: str = "", extra_args: str = "-timeout 5 -retries 1 -rate-li
         install_result = tool_install(package="nuclei-templates")
         if install_result.ok:
             template_dir = "/usr/local/share/nuclei-templates"
-            retry_sanitized = sanitized
+            retry_sanitized = _sanitize_nuclei_args(sanitized)
             if "-t" not in retry_sanitized and "--templates" not in retry_sanitized:
                 retry_sanitized = f"-t {shlex.quote(template_dir)} {retry_sanitized}".strip()
             retry_command = f"nuclei -u {shlex.quote(target)} {retry_sanitized}".strip()
@@ -2383,6 +2536,8 @@ def tool_nuclei(url: str = "", extra_args: str = "-timeout 5 -retries 1 -rate-li
         _append_unique_note(
             "Nuclei output indicates a template/path issue; retry with local nuclei-templates or a different template set."
         )
+    if result.ok:
+        _record_nuclei_findings(target, _tool_result_text(result))
     return result
 
 
@@ -3259,8 +3414,8 @@ TOOL_DESCRIPTIONS = {
     "nikto": "Run Nikto against a web target. args: {url, extra_args, timeout}",
     "gobuster": "Run Gobuster directory discovery with an inline wordlist. args: {url, extra_args, timeout}; do not pass --url or --dir.",
     # Terminal & tools
-    "nmap": "Run Nmap via WSL. args: {target, extra_args, timeout}",
-    "nuclei": "Run Nuclei via WSL. args: {url, extra_args, timeout}; templates auto-install from nuclei-templates when needed.",
+    "nmap": "Run Nmap via WSL. args: {target, extra_args, timeout}; host scans force -Pn and allow long scans.",
+    "nuclei": "Run Nuclei via WSL. args: {url, extra_args, timeout}; templates auto-install from nuclei-templates when needed. Do not use --template-id all or /all template paths.",
     "sqlmap": "Run SQLMap against a URL. args: {url, extra_args, timeout}",
     "install": "Generic installer/deployer. args: {package, destination, source}",
     "site_map": "Snapshot of discovered site map and scan state. no args",
@@ -3415,6 +3570,8 @@ Rules:
 - Linux tools are routed automatically to the best WSL distro; request tools by name, not by wrapping them in wsl unless you need a specific distro.
 - For host-scanning tools like nmap, masscan, rustscan, enum4linux, smbclient, snmpwalk, sslscan, and traceroute, use bare hosts or CIDRs, not full URLs.
 - For URL-based tools like sqlmap, nuclei, ffuf, feroxbuster, gobuster, dirb, dirsearch, and wfuzz, keep the full URL.
+- Nuclei auto-installs nuclei-templates when needed; do not keep retrying remote GitHub template URLs, --template-id all, or /all template paths.
+- Nmap host scans automatically add -Pn; use integer timeouts and allow long-running scans when needed.
 - If a command fails ("command not found"), YOU MUST FIX IT! Use run_command to install the missing tool (e.g., `wsl -d <distro> sudo apt-get update && sudo apt-get install -y <tool>`) or use install_tool for Windows native.
 - Vary your commands — change flags, targets, or approaches if retrying
 - Finish when you have good coverage and both reports are written
@@ -3744,7 +3901,8 @@ Rules:
 - For URL-based tools like sqlmap, nuclei, ffuf, feroxbuster, gobuster, dirb, dirsearch, and wfuzz, keep the full URL.
 - WhatWeb uses color output normalization already; use --color=never, not --no-color.
 - Gobuster already sets the target URL and inline wordlist; do not pass --url or --dir.
-- Nuclei auto-installs nuclei-templates when needed; do not keep retrying remote GitHub template URLs.
+- Nuclei auto-installs nuclei-templates when needed; do not keep retrying remote GitHub template URLs, --template-id all, or /all template paths.
+- Nmap host scans automatically add -Pn; use integer timeouts and allow long-running scans when needed.
 - If a tool is missing ("command not found"), YOU MUST FIX IT! Use run_command to install it (e.g., `wsl -d <distro> sudo apt-get update && sudo apt-get install -y <tool>`).
 - Finish when all hosts are assessed and reports are written
 
