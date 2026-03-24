@@ -238,10 +238,6 @@ print("[bootstrap] Checking dependencies …")
 _bootstrap_packages()
 _PW_STATUS = _bootstrap_playwright()
 _LH_OK, _LH_MSG = _bootstrap_lighthouse_runtime()
-_OL_OK, _OL_MSG = _bootstrap_ollama("qwen3:14b")
-if not _OL_OK:
-    print(f"[FATAL] Ollama: {_OL_MSG}")
-    sys.exit(1)
 _DETECTED_TOOLS = _detect_tools()
 _WSL_DISTROS = _detect_wsl_distros()
 if _WSL_DISTROS:
@@ -280,7 +276,8 @@ from security_tools import (  # type: ignore
 # ═══════════════════════════════════════════════════════════
 #  CONFIGURATION
 # ═══════════════════════════════════════════════════════════
-MODEL = "qwen3:14b"
+DEFAULT_MODEL = "qwen3-coder:30b"
+MODEL = DEFAULT_MODEL
 DEFAULT_DOMAIN = "getaxiom.ca"
 
 OUTPUT_DIR = Path("audit_output")
@@ -6341,8 +6338,8 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
 # ═══════════════════════════════════════════════════════════
 #  INTERACTIVE STARTUP
 # ═══════════════════════════════════════════════════════════
-def interactive_startup() -> Tuple[str, str, str, bool, str]:
-    """Interactive menu. Returns (target, profile, mode, fresh, task)."""
+def interactive_startup() -> Tuple[str, str, str, bool, str, str]:
+    """Interactive menu. Returns (target, profile, mode, fresh, task, model)."""
     console.print(_ASCII_BANNER)
     console.print(Panel(
         "[bold]Autonomous Pentest Agent[/]\n"
@@ -6366,6 +6363,10 @@ def interactive_startup() -> Tuple[str, str, str, bool, str]:
     else:
         raw = Prompt.ask("[bold]Target domain[/]", default=DEFAULT_DOMAIN)
     target = raw.strip()
+    model = Prompt.ask(
+        "[bold]Model[/] [dim](recommended: qwen3-coder:30b; any Ollama tag works)[/]",
+        default=DEFAULT_MODEL,
+    ).strip()
     profile = Prompt.ask(
         "[bold]Scan profile[/]",
         choices=["quick", "standard", "deep"],
@@ -6379,7 +6380,7 @@ def interactive_startup() -> Tuple[str, str, str, bool, str]:
         "[bold]Resume from checkpoint if available?[/]", default=True
     )
     console.print()
-    return target, profile, mode, fresh, task
+    return target, profile, mode, fresh, task, model
 
 
 # ═══════════════════════════════════════════════════════════
@@ -6392,6 +6393,7 @@ if __name__ == "__main__":
     _cli = False
     _mode = "web"
     _task = ""
+    _model = DEFAULT_MODEL
     _args = sys.argv[1:]
     i = 0
     while i < len(_args):
@@ -6404,6 +6406,13 @@ if __name__ == "__main__":
             _cli = True
         elif arg == "--network":
             _mode = "network"
+            _cli = True
+        elif arg == "--model" and i + 1 < len(_args):
+            _model = _args[i + 1]
+            _cli = True
+            i += 1
+        elif arg.startswith("--model="):
+            _model = arg.split("=", 1)[1]
             _cli = True
         elif arg == "--task" and i + 1 < len(_args):
             _task = _args[i + 1]
@@ -6419,13 +6428,19 @@ if __name__ == "__main__":
 
     if not _cli:
         # Interactive mode
-        _domain, _profile, _mode, _fresh, _task = interactive_startup()
+        _domain, _profile, _mode, _fresh, _task, _model = interactive_startup()
         p = SCAN_PROFILES.get(_profile, SCAN_PROFILES["standard"])
         MAX_STEPS = p["max_steps"]
         BOOTSTRAP_BATCH = p["batch"]
         run_agent._profile = _profile  # type: ignore
     run_agent._mode = _mode  # type: ignore
     run_agent._task = _task  # type: ignore
+    MODEL = _model.strip() or DEFAULT_MODEL
+    print(f"[bootstrap] Selected model: {MODEL}")
+    _OL_OK, _OL_MSG = _bootstrap_ollama(MODEL)
+    if not _OL_OK:
+        print(f"[FATAL] Ollama: {_OL_MSG}")
+        sys.exit(1)
     if _mode == "network":
         run_agent(_domain, resume=not _fresh, fresh=_fresh, operator_task=_task)
     else:

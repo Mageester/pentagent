@@ -8,7 +8,7 @@
 
 ## Overview
 
-PentAgent is a self-bootstrapping, autonomous penetration testing framework designed for authorized security assessments. It uses a local large language model (Qwen3 14B via Ollama) to orchestrate multi-phase security testing without cloud dependencies or API keys.
+PentAgent is a self-bootstrapping, autonomous penetration testing framework designed for authorized security assessments. It uses a local large language model via Ollama to orchestrate multi-phase security testing without cloud dependencies or API keys.
 
 The agent operates as an intelligent decision loop: it runs reconnaissance, analyzes results, decides what to test next, executes security tools, and produces structured reports — all without human intervention after target specification.
 
@@ -20,7 +20,7 @@ The agent operates as an intelligent decision loop: it runs reconnaissance, anal
 
 | Capability | Description |
 |---|---|
-| **LLM-Driven Orchestration** | Qwen3 14B decides what to scan, what tools to run, and when the assessment is complete |
+| **LLM-Driven Orchestration** | Your chosen Ollama model decides what to scan, what tools to run, and when the assessment is complete |
 | **Full Terminal Access** | The agent can execute any shell command — nmap, sqlmap, nuclei, or custom scripts |
 | **Self-Bootstrapping** | Auto-installs Python dependencies, Playwright, and can install security tools via winget/pip |
 | **8 Built-In Security Checks** | SSL/TLS, cookies, sensitive paths, CORS, mixed content, email security, info disclosure, security headers (with A–F grading) |
@@ -97,9 +97,11 @@ The script auto-installs all Python dependencies on first run. No manual `pip in
 # Ensure Ollama is running
 ollama serve
 
-# The agent auto-pulls the model if missing, or manually:
-ollama pull qwen3:14b
+# The agent can auto-pull the selected model if missing, or manually:
+ollama pull qwen3-coder:30b
 ```
+
+Recommended default for strongest reasoning is `qwen3-coder:30b`, but you can choose any Ollama model tag at startup or with `--model`.
 
 ---
 
@@ -230,7 +232,7 @@ This tool is **not** intended for:
 ## Tech Stack
 
 - **Python 3.9+** — Core runtime
-- **Ollama + Qwen3 14B** — Local LLM inference (no cloud APIs)
+- **Ollama + chosen local model** — Local LLM inference (no cloud APIs)
 - **Playwright** — Browser automation and rendering
 - **BeautifulSoup + lxml** — HTML parsing
 - **Rich** — Terminal UI
