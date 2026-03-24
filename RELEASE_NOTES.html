@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>PentAgent Release Notes</title>
+  <style>
+    :root {
+      --bg: #07111a;
+      --bg2: #0b1c2a;
+      --panel: rgba(13, 22, 33, 0.86);
+      --panel-strong: rgba(15, 28, 42, 0.96);
+      --line: rgba(148, 163, 184, 0.18);
+      --text: #e7eef8;
+      --muted: #8ea3ba;
+      --muted-2: #a9bdd2;
+      --accent: #34d399;
+      --accent-2: #22d3ee;
+      --accent-3: #f59e0b;
+      --accent-4: #f87171;
+      --shadow: 0 28px 90px rgba(2, 8, 23, 0.56);
+      --radius-xl: 28px;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      --radius-sm: 10px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 15% 15%, rgba(34, 211, 238, 0.14), transparent 30%),
+        radial-gradient(circle at 85% 10%, rgba(52, 211, 153, 0.13), transparent 28%),
+        radial-gradient(circle at 85% 88%, rgba(245, 158, 11, 0.08), transparent 22%),
+        linear-gradient(140deg, var(--bg), var(--bg2) 54%, #06111d 100%);
+      font-family: "Segoe UI", "Trebuchet MS", "Helvetica Neue", Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent 92%);
+      opacity: 0.35;
+    }
+
+    a {
+      color: var(--accent-2);
+      text-decoration: none;
+    }
+
+    a:hover { text-decoration: underline; }
+
+    .wrap {
+      width: min(1260px, calc(100% - 36px));
+      margin: 0 auto;
+      padding: 28px 0 60px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.38fr) minmax(320px, 0.62fr);
+      gap: 18px;
+      align-items: stretch;
+      margin-top: 6px;
+    }
+
+    .card {
+      background: linear-gradient(180deg, rgba(22, 38, 56, 0.8), rgba(10, 18, 28, 0.96));
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+      transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+      animation: rise-in 420ms ease both;
+    }
+
+    .card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(34, 211, 238, 0.32);
+      box-shadow: 0 34px 100px rgba(2, 8, 23, 0.66);
+    }
+
+    .hero-main {
+      padding: 30px 30px 28px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-main::after {
+      content: "";
+      position: absolute;
+      inset: auto -12% -45% auto;
+      width: 340px;
+      height: 340px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(34, 211, 238, 0.18), transparent 72%);
+      filter: blur(4px);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(34, 211, 238, 0.24);
+      background: rgba(8, 20, 32, 0.78);
+      color: #b5f7ff;
+      font-size: 0.78rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--accent-2), var(--accent));
+      box-shadow: 0 0 18px rgba(34, 211, 238, 0.8);
+    }
+
+    h1, h2, h3 {
+      margin: 0;
+      line-height: 1.02;
+    }
+
+    h1 {
+      margin-top: 16px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2.7rem, 5vw, 4.8rem);
+      letter-spacing: -0.06em;
+    }
+
+    .hero-copy {
+      margin: 16px 0 0;
+      max-width: 72ch;
+      font-size: 1.05rem;
+      line-height: 1.75;
+      color: var(--muted-2);
+    }
+
+    .hero-summary {
+      margin-top: 22px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      background: rgba(255, 255, 255, 0.04);
+      color: #d7e5f6;
+      font-size: 0.92rem;
+      white-space: nowrap;
+    }
+
+    .pill .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 18px rgba(52, 211, 153, 0.9);
+    }
+
+    .hero-side {
+      display: grid;
+      gap: 14px;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      padding: 16px;
+    }
+
+    .stat {
+      padding: 18px 16px;
+      border-radius: var(--radius-lg);
+      background: linear-gradient(180deg, rgba(9, 19, 30, 0.96), rgba(15, 29, 43, 0.92));
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      min-height: 110px;
+    }
+
+    .stat .value {
+      display: block;
+      margin-top: 8px;
+      font-size: 1.9rem;
+      font-weight: 800;
+      letter-spacing: -0.05em;
+    }
+
+    .stat .label {
+      display: block;
+      color: var(--muted);
+      font-size: 0.82rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      line-height: 1.4;
+    }
+
+    .mini-panel {
+      padding: 18px 20px 20px;
+      background: linear-gradient(180deg, rgba(16, 29, 45, 0.86), rgba(8, 17, 27, 0.92));
+    }
+
+    .mini-title {
+      font-size: 0.82rem;
+      color: var(--muted);
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    .bullet-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: grid;
+      gap: 10px;
+    }
+
+    .bullet-list li {
+      padding-left: 18px;
+      position: relative;
+      color: #dce7f4;
+      line-height: 1.55;
+    }
+
+    .bullet-list li::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent-2), var(--accent));
+      position: absolute;
+      left: 0;
+      top: 0.55em;
+      box-shadow: 0 0 14px rgba(34, 211, 238, 0.55);
+    }
+
+    .section {
+      margin-top: 22px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+      margin: 26px 4px 14px;
+    }
+
+    .section-head h2 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 1.7rem;
+      letter-spacing: -0.03em;
+    }
+
+    .section-head p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+      max-width: 68ch;
+      text-align: right;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .feature {
+      padding: 20px;
+      min-height: 180px;
+    }
+
+    .feature .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(34, 211, 238, 0.08);
+      border: 1px solid rgba(34, 211, 238, 0.16);
+      color: #b7f8ff;
+      font-size: 0.76rem;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      margin-bottom: 14px;
+    }
+
+    .feature h3 {
+      font-size: 1.07rem;
+      margin-bottom: 8px;
+    }
+
+    .feature p {
+      margin: 0;
+      color: var(--muted-2);
+      line-height: 1.7;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 14px;
+    }
+
+    .timeline-item {
+      display: grid;
+      grid-template-columns: 170px minmax(0, 1fr);
+      gap: 18px;
+      padding: 18px 20px;
+      align-items: start;
+    }
+
+    .timeline-time {
+      color: var(--accent-2);
+      font-size: 0.8rem;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      padding-top: 4px;
+    }
+
+    .timeline-item h3 {
+      margin-bottom: 8px;
+      font-size: 1.05rem;
+    }
+
+    .timeline-item p {
+      margin: 0;
+      color: var(--muted-2);
+      line-height: 1.7;
+    }
+
+    .matrix {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .panel {
+      padding: 20px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 18px;
+      background: rgba(7, 16, 26, 0.58);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+    }
+
+    th, td {
+      padding: 13px 14px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+      vertical-align: top;
+      text-align: left;
+      line-height: 1.55;
+    }
+
+    th {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      color: #a9bdd2;
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    pre {
+      margin: 0;
+      padding: 16px;
+      border-radius: 16px;
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      background: rgba(2, 8, 23, 0.8);
+      color: #dbeafe;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      line-height: 1.6;
+    }
+
+    .code-row {
+      display: grid;
+      gap: 14px;
+    }
+
+    .code-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .code-head strong {
+      font-size: 0.92rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 11px;
+      border-radius: 999px;
+      background: rgba(52, 211, 153, 0.08);
+      border: 1px solid rgba(52, 211, 153, 0.14);
+      color: #b6f7d4;
+      font-size: 0.8rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .badge.warn {
+      background: rgba(245, 158, 11, 0.08);
+      border-color: rgba(245, 158, 11, 0.18);
+      color: #ffd38a;
+    }
+
+    .badge.cool {
+      background: rgba(34, 211, 238, 0.08);
+      border-color: rgba(34, 211, 238, 0.18);
+      color: #b9f5ff;
+    }
+
+    .footer {
+      margin: 28px 0 0;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.6;
+    }
+
+    .footer a { color: #b9f5ff; }
+
+    @keyframes rise-in {
+      from {
+        opacity: 0;
+        transform: translateY(12px) scale(0.995);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    @media (max-width: 1060px) {
+      .hero { grid-template-columns: 1fr; }
+      .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 760px) {
+      .wrap { width: min(100% - 22px, 1260px); padding-top: 14px; }
+      .hero-main { padding: 22px; }
+      .stats { grid-template-columns: 1fr; }
+      .feature-grid, .matrix { grid-template-columns: 1fr; }
+      .timeline-item { grid-template-columns: 1fr; }
+      .section-head { flex-direction: column; align-items: start; }
+      .section-head p { text-align: left; }
+      h1 { font-size: clamp(2.2rem, 10vw, 4rem); }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <article class="card hero-main">
+        <div class="eyebrow">PentAgent Release Notes</div>
+        <h1>Autonomous pentest operator.<br>More evidence. Less looping.</h1>
+        <p class="hero-copy">
+          This release pushes PentAgent closer to a real operator console: it profiles the target, builds an attack graph,
+          pivots away from failing tools, and turns scan results into a browser-readable release page instead of just raw logs.
+        </p>
+        <div class="hero-summary">
+          <span class="pill"><span class="dot"></span> Evidence-driven planning</span>
+          <span class="pill"><span class="dot"></span> WSL-first tool routing</span>
+          <span class="pill"><span class="dot"></span> HTML + Markdown reports</span>
+          <span class="pill"><span class="dot"></span> Task-focused operator mode</span>
+        </div>
+      </article>
+
+      <aside class="hero-side">
+        <div class="card stats">
+          <div class="stat">
+            <span class="label">Primary mode</span>
+            <span class="value">Web / Network</span>
+          </div>
+          <div class="stat">
+            <span class="label">Reasoning style</span>
+            <span class="value">Graph-led</span>
+          </div>
+          <div class="stat">
+            <span class="label">Tool posture</span>
+            <span class="value">WSL-first</span>
+          </div>
+          <div class="stat">
+            <span class="label">Report output</span>
+            <span class="value">JSON + MD + HTML</span>
+          </div>
+        </div>
+
+        <div class="card mini-panel">
+          <div class="mini-title">What this build is trying to do</div>
+          <ul class="bullet-list">
+            <li>Choose pivots from observed evidence instead of replaying the same checklist.</li>
+            <li>Validate findings before promoting them into the final report.</li>
+            <li>Keep the operator informed with a richer live UI and better summaries.</li>
+            <li>Prefer Kali/Athena WSL tools when they are available on the host machine.</li>
+          </ul>
+        </div>
+      </aside>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>Release Highlights</h2>
+        <p>The biggest improvements are about quality of decisions: better memory, better pivots, and less time wasted on repeated dead ends.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="card feature">
+          <div class="tag">Core intelligence</div>
+          <h3>Attack graph memory</h3>
+          <p>Discovered targets, findings, and tool friction are tracked as a graph so the agent can choose the next pivot from actual evidence instead of restarting from zero each step.</p>
+        </article>
+        <article class="card feature">
+          <div class="tag">Operator control</div>
+          <h3>Task-focused runs</h3>
+          <p>Launch the agent with a goal and it will prioritize that objective first, then keep the run aligned with the most useful subgoals it discovers.</p>
+        </article>
+        <article class="card feature">
+          <div class="tag">Reliability</div>
+          <h3>Failure-aware tool routing</h3>
+          <p>Timeouts, repeated actions, and missing tool failures now feed back into the prompt so the model can pivot instead of looping forever.</p>
+        </article>
+        <article class="card feature">
+          <div class="tag">Environment aware</div>
+          <h3>Kali / Athena WSL support</h3>
+          <p>Network tooling prefers Kali and Athena WSL when they are present, making the agent behave more like a native pentest workstation.</p>
+        </article>
+        <article class="card feature">
+          <div class="tag">Visibility</div>
+          <h3>Informational console UI</h3>
+          <p>The live terminal dashboard now exposes target profile, queue state, last tool, latest finding, graph depth, and tool health to make the run easier to steer.</p>
+        </article>
+        <article class="card feature">
+          <div class="tag">Reporting</div>
+          <h3>Readable release page</h3>
+          <p>This page is the browser-friendly changelog: a clean, detailed release summary that can be shipped with the repo and opened directly in a browser.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>What Changed Under the Hood</h2>
+        <p>These are the code paths that most affect how the agent behaves during a real engagement.</p>
+      </div>
+      <div class="timeline">
+        <article class="card timeline-item">
+          <div class="timeline-time">01 / Prompting</div>
+          <div>
+            <h3>Universal pentest directive</h3>
+            <p>
+              The system prompt now carries a consistent operating policy: prefer evidence gain over checklist repetition, keep findings provisional until validated, and treat phase order as advisory when the evidence suggests a better pivot.
+            </p>
+          </div>
+        </article>
+        <article class="card timeline-item">
+          <div class="timeline-time">02 / Reasoning</div>
+          <div>
+            <h3>Target profiling and attack-graph guidance</h3>
+            <p>
+              The agent records whether a target behaves like a public web domain, local lab service, or network host and uses that profile to decide whether subdomain recon, content discovery, or host enumeration will produce the highest signal.
+            </p>
+          </div>
+        </article>
+        <article class="card timeline-item">
+          <div class="timeline-time">03 / Tooling</div>
+          <div>
+            <h3>WSL-first command execution</h3>
+            <p>
+              Kali and Athena WSL are treated as first-class tool backends. That means the agent can prefer better Linux-native binaries for recon, enumeration, and exploitation support rather than falling back to weak Windows equivalents.
+            </p>
+          </div>
+        </article>
+        <article class="card timeline-item">
+          <div class="timeline-time">04 / Recovery</div>
+          <div>
+            <h3>Timeout and repeat detection</h3>
+            <p>
+              Failed scans now feed back into the model's memory. When a tool stalls, the next action should pivot to a different technique, a narrower target slice, or a more service-specific check instead of retrying the same request.
+            </p>
+          </div>
+        </article>
+        <article class="card timeline-item">
+          <div class="timeline-time">05 / Reporting</div>
+          <div>
+            <h3>Better terminal and browser output</h3>
+            <p>
+              The live console shows more of the internal state, the HTML report surfaces validated findings and tool health, and this release notes page gives the release itself a clear operator-facing narrative.
+            </p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>Capability Matrix</h2>
+        <p>What the agent can now surface, pivot on, or write back into the final report.</p>
+      </div>
+      <div class="matrix">
+        <article class="card panel">
+          <div class="code-head">
+            <strong>Operational behavior</strong>
+            <span class="badge cool">Graph aware</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Capability</th>
+                <th>Behavior</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Target classification</td>
+                <td>Profiles public web targets, localhost/lab targets, and network scopes so it can choose the right recon path.</td>
+              </tr>
+              <tr>
+                <td>Finding confidence</td>
+                <td>Merges repeated evidence into a single stronger record rather than spamming duplicate noise.</td>
+              </tr>
+              <tr>
+                <td>Tool health</td>
+                <td>Tracks failures and timeouts so unhealthy tools can be de-prioritized immediately.</td>
+              </tr>
+              <tr>
+                <td>Pivot selection</td>
+                <td>Uses attack-graph state and recent notes to choose the next host, service, or surface to explore.</td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+
+        <article class="card panel">
+          <div class="code-head">
+            <strong>Release usage</strong>
+            <span class="badge">Ready to ship</span>
+          </div>
+          <pre>Recommended launch:
+
+  cd C:\Agent
+  .\.venv\Scripts\Activate.ps1
+  python agent.py
+
+Suggested task:
+
+  "Map the attack surface, validate high-value leads, and report only actionable vulns with repro steps and remediation."</pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>Report Outputs</h2>
+        <p>The agent now writes both machine-readable and operator-friendly artifacts.</p>
+      </div>
+      <div class="matrix">
+        <article class="card panel">
+          <div class="code-head">
+            <strong>Artifacts</strong>
+            <span class="badge warn">Operator view</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>audit_report.json</code></td>
+                <td>Structured machine-readable findings and state.</td>
+              </tr>
+              <tr>
+                <td><code>audit_summary.md</code></td>
+                <td>Compact written summary for quick review.</td>
+              </tr>
+              <tr>
+                <td><code>audit_summary.html</code></td>
+                <td>Detailed browser-friendly report with findings, graphs, and tool health.</td>
+              </tr>
+              <tr>
+                <td><code>RELEASE_NOTES.html</code></td>
+                <td>This polished release/changelog page.</td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+
+        <article class="card panel">
+          <div class="code-head">
+            <strong>Why this matters</strong>
+            <span class="badge cool">Readable</span>
+          </div>
+          <pre>Instead of:
+  - raw scan logs
+  - repeated retry noise
+  - empty summarize loops
+
+You get:
+  - validated findings
+  - pivot history
+  - target profile
+  - operator task focus
+  - a browser page that actually reads like release notes</pre>
+        </article>
+      </div>
+    </section>
+
+    <footer class="footer">
+      Built for authorized penetration testers and red team operators.<br />
+      Open this page directly from the repository root or link it from your release notes.
+    </footer>
+  </main>
+</body>
+</html>

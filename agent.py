@@ -20,8 +20,10 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
+import ipaddress
 import json
 import hashlib
+from html import escape as html_escape
 import os
 import pathlib
 import re
@@ -285,6 +287,7 @@ OUTPUT_DIR = Path("audit_output")
 CHECKPOINT_PATH = OUTPUT_DIR / "checkpoint.json"
 JSON_REPORT = OUTPUT_DIR / "audit_report.json"
 MD_REPORT = OUTPUT_DIR / "audit_summary.md"
+HTML_REPORT = OUTPUT_DIR / "audit_summary.html"
 SCREENSHOTS_DIR = OUTPUT_DIR / "screenshots"
 LIGHTHOUSE_DIR = OUTPUT_DIR / "lighthouse"
 SCAN_LOGS_DIR = OUTPUT_DIR / "scan_logs"
@@ -386,10 +389,16 @@ def ui_banner(domain: str, profile: str = "standard") -> None:
         f"[dim]Target:[/]   [bold bright_white]{domain}[/]",
         f"[dim]Model:[/]    [bold]{MODEL}[/]",
         f"[dim]Profile:[/]  [bold]{profile}[/]",
+    ]
+    if STATE is not None and getattr(STATE, "target_profile", "").strip():
+        lines.append(f"[dim]Target Type:[/] [bold]{STATE.target_profile}[/]")
+    if STATE is not None and getattr(STATE, "operator_task", "").strip():
+        lines.append(f"[dim]Task:[/]     [bold]{compact_text(STATE.operator_task, 140)}[/]")
+    lines.extend([
         "",
         f"  [green]✔[/] Ollama   {pw_icon} Playwright   {lh_icon} Lighthouse",
         f"  [dim]External tools:[/] {avail_str}",
-    ]
+    ])
     if not LIGHTHOUSE_AVAILABLE:
         lines.append(f"  [dim]{_LH_MSG}[/]")
     console.print(Panel("\n".join(lines), border_style="bright_red",
@@ -419,18 +428,120 @@ def ui_llm(action: str, detail: str, duration: float) -> None:
     console.print(f"    → [bold]{action}[/]  {detail}")
 
 
+def _latest_note_text(state: "AgentState") -> str:
+    for note in reversed(state.notes):
+        note = (note or "").strip()
+        if note:
+            return compact_text(note, 160)
+    return ""
+
+
+def _latest_finding_text(state: "AgentState") -> str:
+    if not state.findings:
+        return ""
+    finding = state.findings[-1]
+    kind = finding.get("kind", "finding")
+    severity = finding.get("severity", "info")
+    url = finding.get("url", "")
+    detail = compact_text(str(finding.get("detail", "")), 180)
+    parts = [f"{severity}:{kind}"]
+    if url:
+        parts.append(url)
+    if detail:
+        parts.append(detail)
+    return " | ".join(parts)
+
+
+def _latest_tool_text(state: "AgentState") -> str:
+    for event in reversed(state.recent_events):
+        if event.get("type") != "tool_result":
+            continue
+        tool = event.get("tool", "")
+        ok = "ok" if event.get("ok") else "fail"
+        duration = event.get("duration_s", 0.0)
+        output = compact_text(str(event.get("output", "")), 120)
+        error = compact_text(str(event.get("error", "")), 120)
+        detail = output or error
+        return f"{tool} [{ok}] {duration:.1f}s {detail}".strip()
+    return ""
+
+
+def _queue_preview(state: "AgentState", limit: int = 4) -> str:
+    if not state.queued_urls:
+        return ""
+    return ", ".join(state.queued_urls[:limit])
+
+
 def ui_dashboard(state: "AgentState") -> None:
     grid = Table.grid(expand=True, padding=(0, 2))
     grid.add_column(justify="left", ratio=1)
-    grid.add_column(justify="left", ratio=1)
-    grid.add_row(
-        f"[bold cyan]Pages[/]  {len(state.pages)}",
-        f"[bold yellow]Queue[/]  {len(state.queued_urls)}",
-    )
-    grid.add_row(
-        f"[bold red]Findings[/]  {len(state.findings)}",
-        f"[bold green]Steps[/]  {state.step}/{MAX_STEPS}",
-    )
+    grid.add_column(justify="left", ratio=2)
+    grid.add_column(justify="left", ratio=2)
+    goal = compact_text(state.goal, 88)
+    task = compact_text(getattr(state, "operator_task", ""), 88)
+    latest_finding = _latest_finding_text(state)
+    latest_note = _latest_note_text(state)
+    latest_tool = _latest_tool_text(state)
+    queue_preview = _queue_preview(state)
+    graph_summary = _attack_graph_summary(state)
+    target_profile = getattr(state, "target_profile", "") or _target_profile_from_state()
+    tool_health = _tool_health_summary(state, limit=3)
+    tool_health_text = "; ".join(
+        f"{item['tool']}:{item['failure']}/{item['timeouts']}"
+        for item in tool_health
+    ) or "clean"
+    if state.mode == "network":
+        grid.add_row(
+            f"[bold cyan]Subnets[/]  {len(getattr(state, 'network_subnets', []))}",
+            f"[bold yellow]Hosts[/]  {len(getattr(state, 'network_hosts', []))}",
+            f"[bold white]Goal[/]  {goal}",
+        )
+        grid.add_row(
+            f"[bold magenta]Queue[/]  {len(state.queued_urls)}",
+            f"[bold red]Findings[/]  {len(state.findings)}",
+            f"[dim]Next[/]  {compact_text(queue_preview or 'none', 88)}",
+        )
+        grid.add_row(
+            f"[bold green]Steps[/]  {state.step}/{MAX_STEPS}",
+            f"[dim]Mode[/]  network",
+            f"[dim]Task[/]  {task or 'none'}",
+        )
+        grid.add_row(
+            f"[dim]Profile[/]  {target_profile}",
+            f"[dim]Graph[/]  {graph_summary['nodes']}n/{graph_summary['edges']}e",
+            f"[dim]Last tool[/]  {latest_tool or 'none'}",
+        )
+        grid.add_row(
+            f"[dim]Latest note[/]  {latest_note or 'none'}",
+            f"[dim]Latest finding[/]  {latest_finding or 'none'}",
+            f"[dim]Tool health[/]  {compact_text(tool_health_text, 88)}",
+        )
+    else:
+        grid.add_row(
+            f"[bold cyan]Pages[/]  {len(state.pages)}",
+            f"[bold yellow]Queue[/]  {len(state.queued_urls)}",
+            f"[bold white]Goal[/]  {goal}",
+        )
+        grid.add_row(
+            f"[bold red]Findings[/]  {len(state.findings)}",
+            f"[bold green]Steps[/]  {state.step}/{MAX_STEPS}",
+            f"[dim]Next[/]  {compact_text(queue_preview or 'none', 88)}",
+        )
+        grid.add_row(
+            f"[dim]Profile[/]  {target_profile}",
+            f"[dim]Task[/]  {task or 'none'}",
+            f"[dim]Graph[/]  {graph_summary['nodes']}n/{graph_summary['edges']}e",
+        )
+        grid.add_row(
+            f"[dim]Last tool[/]  {latest_tool or 'none'}",
+            f"[dim]Latest note[/]  {latest_note or 'none'}",
+            f"[dim]Latest finding[/]  {latest_finding or 'none'}",
+        )
+        grid.add_row(
+            f"[dim]Tool health[/]  {compact_text(tool_health_text, 88)}",
+            "",
+            "",
+        )
     console.print(Panel(grid, title="[bold]Dashboard[/]",
                         border_style="bright_blue", padding=(0, 2)))
 
@@ -438,7 +549,7 @@ def ui_dashboard(state: "AgentState") -> None:
 def ui_done(elapsed: float) -> None:
     console.print(Panel(
         f"[bold green]✅  Audit complete[/]\n"
-        f"Reports saved to [bold]{OUTPUT_DIR}/[/]\n"
+        f"Reports saved to [bold]{OUTPUT_DIR}/[/] (JSON, Markdown, HTML)\n"
         f"Runtime: [bold]{elapsed:.1f}s[/]",
         border_style="green", padding=(1, 2),
     ))
@@ -462,8 +573,12 @@ class AgentState:
     domain: str
     start_url: str
     goal: str
+    operator_task: str = ""
+    target_profile: str = ""
     mode: str = "web"
     step: int = 0
+    network_subnets: List[str] = field(default_factory=list)
+    network_hosts: List[Dict[str, Any]] = field(default_factory=list)
     queued_urls: List[str] = field(default_factory=list)
     seen_urls: Set[str] = field(default_factory=set)
     pages: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -472,6 +587,11 @@ class AgentState:
     recent_events: List[Dict[str, Any]] = field(default_factory=list)
     memory_summary: str = ""
     recent_tool_signatures: List[str] = field(default_factory=list)
+    tool_repeat_counts: Dict[str, int] = field(default_factory=dict)
+    last_action_signature: str = ""
+    attack_graph_nodes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    attack_graph_edges: List[Dict[str, Any]] = field(default_factory=list)
+    tool_health: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -480,7 +600,11 @@ class AgentState:
             "mode": self.mode,
             "start_url": self.start_url,
             "goal": self.goal,
+            "operator_task": self.operator_task,
+            "target_profile": self.target_profile,
             "step": self.step,
+            "network_subnets": self.network_subnets,
+            "network_hosts": self.network_hosts,
             "queued_urls": self.queued_urls,
             "seen_urls": sorted(self.seen_urls),
             "pages": self.pages,
@@ -489,6 +613,11 @@ class AgentState:
             "recent_events": self.recent_events[-20:],
             "memory_summary": self.memory_summary,
             "recent_tool_signatures": self.recent_tool_signatures,
+            "tool_repeat_counts": self.tool_repeat_counts,
+            "last_action_signature": self.last_action_signature,
+            "attack_graph_nodes": self.attack_graph_nodes,
+            "attack_graph_edges": self.attack_graph_edges,
+            "tool_health": self.tool_health,
         }
 
     @classmethod
@@ -499,7 +628,11 @@ class AgentState:
             mode=data.get("mode", "web"),
             start_url=data["start_url"],
             goal=data["goal"],
+            operator_task=data.get("operator_task", ""),
+            target_profile=data.get("target_profile", ""),
             step=data.get("step", 0),
+            network_subnets=data.get("network_subnets", []),
+            network_hosts=data.get("network_hosts", []),
             queued_urls=data.get("queued_urls", []),
             seen_urls=set(data.get("seen_urls", [])),
             pages=data.get("pages", {}),
@@ -508,6 +641,11 @@ class AgentState:
             recent_events=data.get("recent_events", []),
             memory_summary=data.get("memory_summary", ""),
             recent_tool_signatures=data.get("recent_tool_signatures", []),
+            tool_repeat_counts=data.get("tool_repeat_counts", {}),
+            last_action_signature=data.get("last_action_signature", ""),
+            attack_graph_nodes=data.get("attack_graph_nodes", {}),
+            attack_graph_edges=data.get("attack_graph_edges", []),
+            tool_health=data.get("tool_health", {}),
         )
 
     def checkpoint(self, path: str) -> None:
@@ -605,12 +743,26 @@ class ToolRegistry:
 
             result = fn(**kwargs)
             result.duration_s = time.time() - start
+            if STATE is not None:
+                _record_tool_health(resolved_name, result)
+                _graph_add_node(
+                    "tool",
+                    resolved_name,
+                    label=resolved_name,
+                    attrs={
+                        "last_ok": result.ok,
+                        "last_duration_s": round(result.duration_s, 2),
+                    },
+                )
             return result
         except Exception:
-            return ToolResult(
+            result = ToolResult(
                 ok=False, output="", error=traceback.format_exc(),
                 duration_s=time.time() - start,
             )
+            if STATE is not None:
+                _record_tool_health(resolved_name or name, result)
+            return result
 
 
 # ═══════════════════════════════════════════════════════════
@@ -641,6 +793,8 @@ def normalize_url(url: str) -> str:
 
 def same_domain(url: str, domain: str) -> bool:
     host = (urlparse(url).hostname or "").lower()
+    if STATE is not None and STATE.mode == "network":
+        return _network_host_in_scope(host)
     dom = domain.lower().split(":", 1)[0]
     return host == dom or host.endswith("." + dom)
 
@@ -662,13 +816,219 @@ def _canonical_tool_name(name: str) -> str:
     return re.sub(r"[\s\-]+", "_", (name or "").strip().lower())
 
 
+def _split_operator_tasks(task_text: str) -> List[str]:
+    items = []
+    for part in re.split(r"[;\n]+", task_text or ""):
+        cleaned = part.strip().strip("-•").strip()
+        if cleaned:
+            items.append(cleaned)
+    return items[:12]
+
+
+def _operator_task_items() -> List[str]:
+    assert STATE is not None
+    return _split_operator_tasks(getattr(STATE, "operator_task", ""))
+
+
+def _operator_task_block() -> str:
+    items = _operator_task_items() if STATE is not None else []
+    if not items:
+        return ""
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _network_host_in_scope(host: str) -> bool:
+    assert STATE is not None
+    host_l = (host or "").strip().lower()
+    if not host_l:
+        return False
+
+    subnet_sources = list(getattr(STATE, "network_subnets", []) or [])
+    if STATE.domain and STATE.domain not in {"auto"}:
+        if "/" in STATE.domain:
+            subnet_sources.append(STATE.domain)
+
+    try:
+        ip = ipaddress.ip_address(host_l)
+    except ValueError:
+        ip = None
+
+    if ip is not None:
+        for subnet in subnet_sources:
+            try:
+                if ip in ipaddress.ip_network(subnet, strict=False):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    discovered = set()
+    for rec in getattr(STATE, "network_hosts", []) or []:
+        host_name = (rec.get("host") or "").strip().lower()
+        if host_name:
+            discovered.add(host_name)
+        hostname = (rec.get("hostname") or "").strip().lower()
+        if hostname:
+            discovered.add(hostname)
+    return host_l in discovered
+
+
+def _graph_node_id(kind: str, value: str) -> str:
+    kind_l = _normalized_finding_kind(kind) if kind else "node"
+    value_l = compact_text(value or "", 180).lower()
+    if not value_l:
+        value_l = "unknown"
+    raw = f"{kind_l}:{value_l}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _graph_add_node(kind: str, value: str, label: str = "",
+                   attrs: Optional[Dict[str, Any]] = None) -> str:
+    assert STATE is not None
+    node_id = _graph_node_id(kind, value)
+    node = STATE.attack_graph_nodes.setdefault(node_id, {
+        "id": node_id,
+        "kind": _normalized_finding_kind(kind),
+        "value": compact_text(value, 400),
+        "label": compact_text(label or value, 180),
+        "attrs": {},
+    })
+    if attrs:
+        node.setdefault("attrs", {}).update(attrs)
+    return node_id
+
+
+def _graph_add_edge(src: str, dst: str, relation: str,
+                    attrs: Optional[Dict[str, Any]] = None) -> None:
+    assert STATE is not None
+    if not src or not dst or src == dst:
+        return
+    edge = {
+        "src": src,
+        "dst": dst,
+        "relation": relation,
+    }
+    if attrs:
+        edge["attrs"] = attrs
+    if edge not in STATE.attack_graph_edges:
+        STATE.attack_graph_edges.append(edge)
+
+
+def _current_tool_name() -> str:
+    assert STATE is not None
+    for event in reversed(STATE.recent_events):
+        if event.get("type") == "tool_result" and event.get("tool"):
+            return str(event.get("tool"))
+        if event.get("type") == "decision" and event.get("data", {}).get("tool"):
+            return str(event.get("data", {}).get("tool"))
+    return ""
+
+
+def _record_tool_health(tool_name: str, result: ToolResult) -> None:
+    assert STATE is not None
+    name = _canonical_tool_name(tool_name)
+    if not name:
+        return
+    stats = STATE.tool_health.setdefault(name, {
+        "calls": 0,
+        "success": 0,
+        "failure": 0,
+        "timeouts": 0,
+    })
+    stats["calls"] += 1
+    if result.ok:
+        stats["success"] += 1
+    else:
+        stats["failure"] += 1
+        err = (result.error or "").lower()
+        if "timed out" in err:
+            stats["timeouts"] += 1
+
+
+def _target_profile_from_state() -> str:
+    assert STATE is not None
+    if STATE.mode == "network":
+        return "network"
+    host = _target_host_label(STATE.domain or STATE.start_url)
+    if host == "localhost" or host.endswith((".localhost", ".local", ".lan", ".internal", ".home.arpa")):
+        return "local-lab-web"
+    if any(token in (STATE.goal or "").lower() for token in ("api", "graphql", "rest", "json")):
+        return "api-heavy-web"
+    if any(page.get("form_count") for page in STATE.pages.values()):
+        return "form-heavy-web"
+    if any(page.get("asset_counts", {}).get("scripts", 0) > 10 for page in STATE.pages.values()):
+        return "spa-like-web"
+    return "web-app"
+
+
+def _refresh_target_profile() -> None:
+    assert STATE is not None
+    STATE.target_profile = _target_profile_from_state()
+
+
+def _infer_target_profile(domain: str, mode: str, start_url: str = "") -> str:
+    if mode == "network":
+        return "network"
+    host = _target_host_label(domain or start_url)
+    if host == "localhost" or host.endswith((".localhost", ".local", ".lan", ".internal", ".home.arpa")):
+        return "local-lab-web"
+    return "web-app"
+
+
 def record_finding(kind: str, severity: str, url: str, detail: str) -> None:
     assert STATE is not None
     kind = _normalized_finding_kind(kind)
     severity = (severity or "").strip().lower() or "info"
-    STATE.findings.append(
-        {"kind": kind, "severity": severity, "url": url, "detail": detail}
+    url_n = normalize_url(url) if url else url
+    detail_n = compact_text(detail, 800)
+    key = (kind, url_n, detail_n.lower())
+    existing = None
+    for finding in reversed(STATE.findings[-60:]):
+        if (
+            finding.get("kind") == kind
+            and finding.get("url") == url_n
+            and compact_text(str(finding.get("detail", "")), 800).lower() == detail_n.lower()
+        ):
+            existing = finding
+            break
+
+    tool_name = _current_tool_name()
+    evidence = {
+        "step": STATE.step,
+        "tool": tool_name,
+    }
+    if existing is not None:
+        evidence_list = existing.setdefault("evidence", [])
+        if evidence not in evidence_list:
+            evidence_list.append(evidence)
+        existing["evidence_count"] = len(evidence_list)
+        existing["validated"] = existing["evidence_count"] >= 2
+        existing["confidence"] = min(
+            1.0,
+            0.35 + 0.2 * existing["evidence_count"] + (0.15 if severity in {"high", "critical"} else 0.0),
+        )
+        existing["severity"] = max(existing.get("severity", severity), severity, key=_severity_rank)
+        return
+
+    finding = {
+        "kind": kind,
+        "severity": severity,
+        "url": url_n,
+        "detail": detail_n,
+        "evidence": [evidence],
+        "evidence_count": 1,
+        "validated": False,
+        "confidence": 0.45 if severity in {"high", "critical"} else 0.3,
+    }
+    STATE.findings.append(finding)
+    finding_id = _graph_add_node(
+        "finding",
+        f"{kind}:{url_n}:{detail_n}",
+        label=f"{severity}:{kind}",
+        attrs=finding,
     )
+    source_id = _graph_add_node("surface", url_n or STATE.domain, label=url_n or STATE.domain)
+    _graph_add_edge(source_id, finding_id, "supports", {"kind": kind, "severity": severity})
 
 
 def limited_event(data: Any) -> str:
@@ -681,6 +1041,72 @@ def add_sig(signature: str) -> None:
     assert STATE is not None
     STATE.recent_tool_signatures.append(signature)
     STATE.recent_tool_signatures = STATE.recent_tool_signatures[-8:]
+
+
+def _queue_unique_url(url: str) -> bool:
+    assert STATE is not None
+    candidate = normalize_url(url)
+    if not candidate or candidate in STATE.seen_urls or candidate in STATE.queued_urls:
+        return False
+    if not same_domain(candidate, STATE.domain):
+        return False
+    STATE.queued_urls.append(candidate)
+    return True
+
+
+def _bump_repeat_count(signature: str) -> int:
+    assert STATE is not None
+    current = int(STATE.tool_repeat_counts.get(signature, 0)) + 1
+    STATE.tool_repeat_counts[signature] = current
+    STATE.last_action_signature = signature
+    return current
+
+
+def _append_unique_network_host(record: Dict[str, Any]) -> Dict[str, Any]:
+    assert STATE is not None
+    host = (record.get("host") or "").strip().lower()
+    if not host:
+        return record
+    for existing in STATE.network_hosts:
+        if (existing.get("host") or "").strip().lower() != host:
+            continue
+        if record.get("hostname") and not existing.get("hostname"):
+            existing["hostname"] = record["hostname"]
+        if record.get("status"):
+            existing["status"] = record["status"]
+        if record.get("last_target"):
+            existing["last_target"] = record["last_target"]
+        if record.get("last_scan"):
+            existing["last_scan"] = record["last_scan"]
+
+        existing_ports = {
+            (str(p.get("port")), str(p.get("proto")))
+            for p in existing.get("ports", [])
+            if isinstance(p, dict)
+        }
+        for port in record.get("ports", []) or []:
+            if not isinstance(port, dict):
+                continue
+            key = (str(port.get("port")), str(port.get("proto")))
+            if key not in existing_ports:
+                existing.setdefault("ports", []).append(port)
+                existing_ports.add(key)
+
+        existing_urls = set(existing.get("web_urls", []))
+        for url in record.get("web_urls", []) or []:
+            if url not in existing_urls:
+                existing.setdefault("web_urls", []).append(url)
+                existing_urls.add(url)
+
+        existing_sources = set(existing.get("sources", []))
+        for src in record.get("sources", []) or []:
+            if src not in existing_sources:
+                existing.setdefault("sources", []).append(src)
+                existing_sources.add(src)
+        return existing
+
+    STATE.network_hosts.append(record)
+    return record
 
 
 def _normalize_scope_target(raw: str, mode: str = "web") -> str:
@@ -699,6 +1125,20 @@ def _normalize_scope_target(raw: str, mode: str = "web") -> str:
 
 def _state_origin_url() -> str:
     assert STATE is not None
+    if STATE.mode == "network":
+        for candidate in getattr(STATE, "queued_urls", []) or []:
+            if candidate.startswith(("http://", "https://")):
+                parsed = urlparse(candidate)
+                if parsed.scheme and parsed.netloc:
+                    return f"{parsed.scheme}://{parsed.netloc}"
+        if getattr(STATE, "network_hosts", []):
+            host = (STATE.network_hosts[0].get("host") or "").strip()
+            if host:
+                return f"http://{host}"
+        if getattr(STATE, "network_subnets", []):
+            subnet = STATE.network_subnets[0].split("/", 1)[0].strip()
+            if subnet:
+                return f"http://{subnet}"
     if STATE.start_url:
         parsed = urlparse(STATE.start_url)
         if parsed.scheme and parsed.netloc:
@@ -1064,6 +1504,19 @@ def tool_fetch_page(url: str) -> ToolResult:
 
     STATE.pages[final_url] = page
     STATE.seen_urls.add(final_url)
+    _graph_add_node(
+        "page",
+        final_url,
+        label=page.get("title") or final_url,
+        attrs={
+            "status_code": page["status_code"],
+            "title": page.get("title", ""),
+            "h1": page.get("h1", ""),
+            "forms": page.get("form_count", 0),
+            "internal_links": len(page.get("internal_links", [])),
+        },
+    )
+    _refresh_target_profile()
 
     summary = {
         "url": final_url, "status_code": page["status_code"],
@@ -2004,8 +2457,26 @@ def tool_run_command(command: str, timeout: int = 120) -> ToolResult:
             "command": command, "returncode": r.returncode,
             "stdout": stdout, "stderr": stderr, "log": str(log_path),
         }, indent=2))
-    except subprocess.TimeoutExpired:
-        return ToolResult(ok=False, output="", error=f"Timed out ({timeout}s)")
+    except subprocess.TimeoutExpired as e:
+        stdout_text = getattr(e, "stdout", "") or ""
+        stderr_text = getattr(e, "stderr", "") or ""
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(
+                    f"$ {command}\n\n--- stdout ---\n{stdout_text}"
+                    f"\n--- stderr ---\n{stderr_text}\n"
+                )
+        except Exception:
+            pass
+        return ToolResult(ok=False, output=json.dumps({
+            "command": command,
+            "returncode": None,
+            "stdout": stdout_text[-4000:] if len(stdout_text) > 4000 else stdout_text,
+            "stderr": stderr_text[-2000:] if len(stderr_text) > 2000 else stderr_text,
+            "log": str(log_path),
+            "timed_out": True,
+            "timeout_s": timeout,
+        }, indent=2), error=f"Timed out ({timeout}s)")
     except Exception as e:
         return ToolResult(ok=False, output="", error=str(e))
 
@@ -2298,6 +2769,41 @@ def _target_to_host(target: str) -> str:
     return raw
 
 
+def _looks_like_ip_or_cidr(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    try:
+        if "/" in text:
+            ipaddress.ip_network(text, strict=False)
+            return True
+        ipaddress.ip_address(text)
+        return True
+    except Exception:
+        return False
+
+
+def _target_host_label(value: str) -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return ""
+    candidate = raw if "://" in raw else f"//{raw}"
+    parsed = urlparse(candidate)
+    host = parsed.hostname or raw.split("/", 1)[0]
+    return (host or raw).strip().lower()
+
+
+def _supports_subdomain_recon(value: str) -> bool:
+    host = _target_host_label(value)
+    if not host:
+        return False
+    if _looks_like_ip_or_cidr(host):
+        return False
+    if host == "localhost" or host.endswith((".localhost", ".local", ".lan", ".internal", ".home.arpa")):
+        return False
+    return "." in host
+
+
 def _sanitize_nuclei_args(extra_args: str) -> str:
     tokens = shlex.split(extra_args or "")
     cleaned: List[str] = []
@@ -2447,7 +2953,107 @@ def _sanitize_gobuster_args(extra_args: str) -> str:
     return " ".join(cleaned).strip()
 
 
-def tool_nmap(target: str = "", extra_args: str = "-sV -sC -A -Pn",
+_NETWORK_WEB_PORTS = {
+    80, 81, 443, 3000, 5000, 7001, 7002, 8000, 8001, 8080, 8081,
+    8443, 8888, 9000, 9443, 10443,
+}
+
+
+def _parse_nmap_inventory(target: str, output_text: str, scan_label: str = "nmap") -> None:
+    assert STATE is not None
+    for line in (output_text or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("Host:"):
+            continue
+        m = re.match(
+            r"^Host:\s+(?P<host>\S+)\s+\((?P<hostname>.*?)\)\s+(?P<rest>.+)$",
+            stripped,
+        )
+        if not m:
+            continue
+        host = m.group("host").strip()
+        hostname = m.group("hostname").strip()
+        rest = m.group("rest").strip()
+        status = "up" if "Status: Up" in rest or "Status: up" in rest else ""
+
+        ports_blob = ""
+        if "Ports:" in rest:
+            ports_blob = rest.split("Ports:", 1)[1]
+            for marker in ("Ignored State:", "Seq Index:", "OS:"):
+                if marker in ports_blob:
+                    ports_blob = ports_blob.split(marker, 1)[0]
+
+        ports: List[Dict[str, Any]] = []
+        open_services: List[str] = []
+        web_urls: List[str] = []
+        for entry in ports_blob.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            parts = [p.strip() for p in entry.split("/")]
+            if len(parts) < 4 or not parts[0].isdigit():
+                continue
+            port_num = int(parts[0])
+            state = parts[1].lower()
+            proto = parts[2].lower()
+            service = parts[4].strip() if len(parts) > 4 else ""
+            ports.append({
+                "port": port_num,
+                "state": state,
+                "proto": proto,
+                "service": service,
+            })
+            if state in {"open", "open|filtered"}:
+                open_services.append(
+                    f"{port_num}/{proto}/{service or 'unknown'}"
+                )
+                service_l = service.lower()
+                if (
+                    port_num in _NETWORK_WEB_PORTS
+                    or service_l in {"http", "https", "http-alt", "http-proxy"}
+                    or "http" in service_l
+                    or "https" in service_l
+                    or "ssl" in service_l
+                ):
+                    scheme = (
+                        "https"
+                        if port_num in {443, 8443, 9443, 10443}
+                        or "https" in service_l
+                        or "ssl" in service_l
+                        else "http"
+                    )
+                    if (scheme == "http" and port_num == 80) or (
+                        scheme == "https" and port_num == 443
+                    ):
+                        web_url = f"{scheme}://{host}"
+                    else:
+                        web_url = f"{scheme}://{host}:{port_num}"
+                    web_urls.append(web_url)
+
+        host_record = _append_unique_network_host({
+            "host": host,
+            "hostname": hostname,
+            "status": status or ("up" if open_services else "unknown"),
+            "ports": ports,
+            "web_urls": [],
+            "sources": [f"{scan_label}:{target}"],
+            "last_target": target,
+            "last_scan": scan_label,
+        })
+
+        for web_url in web_urls:
+            if web_url not in host_record.setdefault("web_urls", []):
+                host_record["web_urls"].append(web_url)
+            if web_url not in STATE.seen_urls and web_url not in STATE.queued_urls:
+                STATE.queued_urls.append(web_url)
+
+        if open_services:
+            _append_unique_note(
+                f"{scan_label} {host}: {', '.join(open_services[:6])}"
+            )
+
+
+def tool_nmap(target: str = "", extra_args: str = "-sV -sC --top-ports 100 -T4 -Pn",
               timeout: int = 600, ports: str = "",
               scan_type: str = "") -> ToolResult:
     assert STATE is not None
@@ -2472,11 +3078,15 @@ def tool_nmap(target: str = "", extra_args: str = "-sV -sC -A -Pn",
         flags = f"{flags} {scan_map[scan_key]}".strip()
     if "-Pn" not in flags and "-sn" not in flags:
         flags = f"{flags} -Pn".strip()
+    if "-oG" not in flags and "-oX" not in flags and "-oN" not in flags:
+        flags = f"{flags} -oG -".strip()
     command = f"nmap {flags} {shlex.quote(host)}".strip()
     result = tool_run_command(command, timeout=timeout)
-    text = _tool_result_text(result).lower()
+    text = _tool_result_text(result)
+    _parse_nmap_inventory(host, text, "nmap")
+    lowered = text.lower()
     if result.ok:
-        if any(phrase in text for phrase in (
+        if any(phrase in lowered for phrase in (
             "filtered tcp ports",
             "0 open",
             "all 1000 scanned ports",
@@ -2486,7 +3096,7 @@ def tool_nmap(target: str = "", extra_args: str = "-sV -sC -A -Pn",
             _append_unique_note(
                 "Nmap found no obvious network services; pivot to HTTP crawling, content discovery, and parameter testing."
             )
-        elif re.search(r"\b80/tcp\s+open\b|\b443/tcp\s+open\b|open\s+http", text):
+        elif re.search(r"\b80/tcp\s+open\b|\b443/tcp\s+open\b|open\s+http", lowered):
             _append_unique_note(
                 "Web service exposed on 80/443; prioritize HTTP content discovery, JS rendering, and active web testing."
             )
@@ -2721,6 +3331,335 @@ def tool_gobuster(url: str = "", extra_args: str = "-q -x php,txt,html,js -t 20"
     except Exception:
         pass
     return ToolResult(ok=result.ok, output=json.dumps(payload, indent=2), error=result.error)
+
+
+def _run_wsl_tool_command(tool_name: str, inner_command: str,
+                          timeout: int = 180, user: str = "root") -> ToolResult:
+    distro = _preferred_wsl_distro(tool_name)
+    if not distro:
+        return ToolResult(
+            ok=False,
+            output="",
+            error=f"No WSL distro available for {tool_name}",
+        )
+    command = (
+        f"wsl -d {shlex.quote(distro)} -u {shlex.quote(user)} "
+        f"bash -lc {shlex.quote(inner_command)}"
+    )
+    return tool_run_command(command, timeout=timeout)
+
+
+def tool_subfinder(domain: str = "", extra_args: str = "-all -silent",
+                   timeout: int = 180) -> ToolResult:
+    assert STATE is not None
+    target = (domain or STATE.domain or "").strip()
+    if not target:
+        return ToolResult(ok=False, output="", error="Missing domain")
+    if "/" in target or not _supports_subdomain_recon(target):
+        note = f"subfinder skipped for non-public host target: {target}"
+        _append_unique_note(note)
+        return ToolResult(ok=True, output=json.dumps({
+            "domain": target,
+            "discovered_count": 0,
+            "discovered": [],
+            "skipped": True,
+            "reason": note,
+        }, indent=2))
+
+    sanitized = extra_args.strip()
+    inner_command = f"subfinder -d {shlex.quote(target)} {sanitized}".strip()
+    result = _run_wsl_tool_command("subfinder", inner_command, timeout=timeout)
+    text = _tool_result_text(result)
+    discovered: List[str] = []
+    for line in text.splitlines():
+        subdomain = line.strip().lower()
+        if not subdomain or subdomain.startswith("["):
+            continue
+        if "." not in subdomain:
+            continue
+        if subdomain not in discovered:
+            discovered.append(subdomain)
+            record_finding("discovery", "low", subdomain,
+                           f"Subdomain discovered via subfinder: {subdomain}")
+            for scheme in ("https", "http"):
+                _queue_unique_url(f"{scheme}://{subdomain}")
+    if discovered:
+        _append_unique_note(
+            f"Subfinder discovered {len(discovered)} subdomain(s) for {target}"
+        )
+        try:
+            httpx_result = tool_httpx(targets="\n".join(discovered[:40]), timeout=min(timeout, 240))
+            if httpx_result.ok:
+                _append_unique_note(
+                    f"HTTPX validated live subdomains for {target}"
+                )
+        except Exception:
+            pass
+    return ToolResult(ok=result.ok, output=json.dumps({
+        "domain": target,
+        "discovered_count": len(discovered),
+        "discovered": discovered[:100],
+    }, indent=2), error=result.error)
+
+
+def tool_httpx(targets: str = "", url: str = "",
+               extra_args: str = "-json -silent -follow-redirects -tech-detect -title -status-code",
+               timeout: int = 180) -> ToolResult:
+    assert STATE is not None
+    target_text = (targets or url or STATE.start_url or "").strip()
+    if not target_text:
+        return ToolResult(ok=False, output="", error="Missing URL or targets")
+
+    target_list: List[str] = []
+    if targets:
+        for item in re.split(r"[\r\n,]+", targets):
+            item = item.strip()
+            if item:
+                if "://" in item:
+                    target_list.append(normalize_url(item))
+                else:
+                    target_list.append(normalize_url(f"https://{item}"))
+                    target_list.append(normalize_url(f"http://{item}"))
+    else:
+        target_list.append(normalize_url(target_text))
+    target_list = list(dict.fromkeys(target_list))
+
+    temp_list_path: Optional[Path] = None
+    try:
+        if len(target_list) == 1:
+            inner_command = (
+                f"httpx -u {shlex.quote(target_list[0])} {extra_args.strip()}".strip()
+            )
+        else:
+            temp_list_path = OUTPUT_DIR / f"httpx_targets_{uuid.uuid4().hex}.txt"
+            with open(temp_list_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(target_list) + "\n")
+            inner_command = (
+                f"httpx -l {shlex.quote(_windows_path_to_wsl(temp_list_path))} "
+                f"{extra_args.strip()}".strip()
+            )
+        result = _run_wsl_tool_command("httpx", inner_command, timeout=timeout)
+    finally:
+        if temp_list_path and temp_list_path.exists():
+            try:
+                temp_list_path.unlink()
+            except Exception:
+                pass
+
+    text = _tool_result_text(result)
+    live_results: List[Dict[str, Any]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            data = json.loads(stripped)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        live_url = normalize_url(str(data.get("url") or data.get("host") or ""))
+        if not live_url:
+            continue
+        entry = {
+            "url": live_url,
+            "status_code": data.get("status_code", data.get("status")),
+            "title": compact_text(str(data.get("title", "")), 160),
+            "tech": data.get("tech", data.get("technologies", [])),
+        }
+        live_results.append(entry)
+        if _queue_unique_url(live_url):
+            record_finding("discovery", "low", live_url,
+                           f"Live endpoint discovered via httpx: {live_url}")
+        techs = entry.get("tech")
+        if isinstance(techs, list) and techs:
+            _append_unique_note(
+                f"HTTPX fingerprinted {live_url} with {', '.join(map(str, techs[:4]))}"
+            )
+        elif entry.get("title"):
+            _append_unique_note(
+                f"HTTPX confirmed {live_url}: {entry['title']}"
+            )
+    if not live_results:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("http://", "https://")):
+                live_results.append({"url": stripped})
+                _queue_unique_url(stripped)
+    return ToolResult(ok=result.ok, output=json.dumps({
+        "targets": target_list[:50],
+        "live_count": len(live_results),
+        "live": live_results[:100],
+    }, indent=2), error=result.error)
+
+
+def tool_wafw00f(url: str = "", extra_args: str = "", timeout: int = 180) -> ToolResult:
+    assert STATE is not None
+    target = normalize_url(url or STATE.start_url)
+    if not same_domain(target, STATE.domain):
+        return ToolResult(ok=False, output="", error=f"Out of scope: {target}")
+    inner_command = f"wafw00f {extra_args.strip()} {shlex.quote(target)}".strip()
+    result = _run_wsl_tool_command("wafw00f", inner_command, timeout=timeout)
+    text = _tool_result_text(result)
+    waf_lines: List[str] = []
+    detected = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        if not stripped:
+            continue
+        if any(term in lower for term in ("waf detected", "is behind", "firewall")):
+            detected = True
+            waf_lines.append(stripped)
+        elif "no waf" in lower or "not behind" in lower:
+            waf_lines.append(stripped)
+    if detected:
+        record_finding("fingerprint", "low", target,
+                       f"WAF detected via wafw00f: {', '.join(waf_lines[:3])}")
+        _append_unique_note(f"WAF detected on {target}: {waf_lines[0] if waf_lines else 'wafw00f output'}")
+    elif waf_lines:
+        _append_unique_note(f"wafw00f checked {target}")
+    return ToolResult(ok=result.ok, output=json.dumps({
+        "target": target,
+        "waf_detected": detected,
+        "noteworthy": waf_lines[:20],
+    }, indent=2), error=result.error)
+
+
+def tool_enum4linux(host: str = "", extra_args: str = "-a",
+                    timeout: int = 300) -> ToolResult:
+    assert STATE is not None
+    target = _target_to_host(host or STATE.domain)
+    if not target:
+        return ToolResult(ok=False, output="", error="Missing host")
+    inner_command = f"enum4linux {extra_args.strip()} {shlex.quote(target)}".strip()
+    result = _run_wsl_tool_command("enum4linux", inner_command, timeout=timeout)
+    text = _tool_result_text(result)
+    noteworthy: List[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        if not stripped:
+            continue
+        if any(term in lower for term in ("anonymous login", "disk", "share", "users", "password policy")):
+            noteworthy.append(stripped)
+    if noteworthy:
+        record_finding("discovery", "low", target,
+                       f"enum4linux notable output: {compact_text(noteworthy[0], 200)}")
+        _append_unique_note(f"enum4linux surfaced {len(noteworthy)} notable line(s) on {target}")
+    return ToolResult(ok=result.ok, output=json.dumps({
+        "target": target,
+        "noteworthy_count": len(noteworthy),
+        "noteworthy": noteworthy[:50],
+    }, indent=2), error=result.error)
+
+
+def tool_snmpwalk(host: str = "", extra_args: str = "-v2c -c public",
+                  timeout: int = 180) -> ToolResult:
+    assert STATE is not None
+    target = _target_to_host(host or STATE.domain)
+    if not target:
+        return ToolResult(ok=False, output="", error="Missing host")
+    inner_command = f"snmpwalk {extra_args.strip()} {shlex.quote(target)} 1.3.6.1.2.1.1".strip()
+    result = _run_wsl_tool_command("snmpwalk", inner_command, timeout=timeout)
+    text = _tool_result_text(result)
+    indicators: List[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        if not stripped:
+            continue
+        if any(term in lower for term in ("sysdescr", "sysname", "syslocation", "syscontact")):
+            indicators.append(stripped)
+    if indicators:
+        record_finding("info_disclosure", "low", target,
+                       f"SNMP exposed system information: {compact_text(indicators[0], 200)}")
+        _append_unique_note(f"snmpwalk exposed system information on {target}")
+    return ToolResult(ok=result.ok, output=json.dumps({
+        "target": target,
+        "indicator_count": len(indicators),
+        "indicators": indicators[:20],
+    }, indent=2), error=result.error)
+
+
+def _sanitize_ffuf_args(extra_args: str) -> str:
+    tokens = shlex.split(extra_args or "")
+    cleaned: List[str] = []
+    skip_next = False
+    for idx, tok in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in {"-u", "--url", "-w", "--wordlist", "-o", "--output"}:
+            skip_next = True
+            continue
+        if tok in {"-of", "--output-format"}:
+            skip_next = True
+            continue
+        cleaned.append(tok)
+    return " ".join(cleaned).strip()
+
+
+def tool_ffuf(url: str = "", extra_args: str = "-mc all -t 20",
+              timeout: int = 240) -> ToolResult:
+    assert STATE is not None
+    target = normalize_url(url or STATE.start_url)
+    if not same_domain(target, STATE.domain):
+        return ToolResult(ok=False, output="", error=f"Out of scope: {target}")
+
+    distro = _preferred_wsl_distro("ffuf")
+    if not distro:
+        return ToolResult(ok=False, output="", error="No WSL distro available for ffuf")
+
+    base = target.rstrip("/")
+    wordlist_path = OUTPUT_DIR / f"ffuf_words_{uuid.uuid4().hex}.txt"
+    out_path = OUTPUT_DIR / f"ffuf_{uuid.uuid4().hex}.json"
+    with open(wordlist_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(_GOBUSTER_WORDS) + "\n")
+    sanitized = _sanitize_ffuf_args(extra_args)
+    inner_command = (
+        f"ffuf -u {shlex.quote(base)}/FUZZ -w {shlex.quote(_windows_path_to_wsl(wordlist_path))} "
+        f"-of json -o {shlex.quote(_windows_path_to_wsl(out_path))} {sanitized}"
+    ).strip()
+    try:
+        result = _run_wsl_tool_command("ffuf", inner_command, timeout=timeout)
+        discovered: List[Dict[str, Any]] = []
+        if out_path.exists():
+            try:
+                with open(out_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for item in data.get("results", [])[:120]:
+                    if not isinstance(item, dict):
+                        continue
+                    found_url = normalize_url(str(item.get("url") or ""))
+                    if not found_url:
+                        continue
+                    status = int(item.get("status", 0) or 0)
+                    discovered.append({
+                        "url": found_url,
+                        "status": status,
+                        "length": item.get("length", 0),
+                    })
+                    if _queue_unique_url(found_url):
+                        severity = "medium" if status in {200, 201, 202, 301, 302, 307, 401, 403} else "low"
+                        record_finding("discovery", severity, found_url,
+                                       f"ffuf discovered {found_url} (status {status})")
+            except Exception:
+                pass
+        if discovered:
+            _append_unique_note(f"ffuf discovered {len(discovered)} path(s) on {target}")
+        return ToolResult(ok=result.ok, output=json.dumps({
+            "target": target,
+            "discovered_count": len(discovered),
+            "discovered": discovered[:100],
+        }, indent=2), error=result.error)
+    finally:
+        for path in (wordlist_path, out_path):
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
 
 
 def tool_parameter_tamper(url: str = "", sample_limit: int = 6) -> ToolResult:
@@ -3207,12 +4146,19 @@ def _group_findings_for_report(findings: List[Dict[str, Any]]) -> List[Dict[str,
             "url": key[2],
             "detail": key[3],
             "count": 0,
+            "evidence_count": 0,
+            "validated": False,
+            "confidence": 0.0,
         })
         item["count"] += 1
+        item["evidence_count"] += int(finding.get("evidence_count", 1) or 1)
+        item["validated"] = item["validated"] or bool(finding.get("validated"))
+        item["confidence"] = max(item["confidence"], float(finding.get("confidence", 0.0) or 0.0))
     items = list(grouped.values())
     items.sort(
         key=lambda f: (
             _severity_rank(f["severity"]),
+            -float(f.get("confidence", 0.0) or 0.0),
             f["kind"],
             f["url"],
             f["detail"],
@@ -3267,26 +4213,8 @@ def _remediation_for_finding(kind: str, detail: str) -> str:
     return "Verify the issue manually and apply the least-privilege fix at the application or infrastructure layer."
 
 
-def tool_write_report() -> ToolResult:
+def _build_report_context() -> Dict[str, Any]:
     assert STATE is not None
-    json_result = tool_write_json_report()
-    md_result = tool_write_markdown_summary()
-    return ToolResult(ok=json_result.ok and md_result.ok,
-                      output=json.dumps({
-                          "json_report": json.loads(json_result.output)
-                          if json_result.output else {},
-                          "markdown_report": json.loads(md_result.output)
-                          if md_result.output else {},
-                      }, indent=2),
-                      error="; ".join(
-                          part for part in [json_result.error, md_result.error]
-                          if part
-                      ))
-
-
-def tool_write_markdown_summary(path: str = "") -> ToolResult:
-    assert STATE is not None
-    p = path or str(MD_REPORT)
     findings = _group_findings_for_report(STATE.findings)
     sev_counts = Counter(f["severity"] for f in findings)
     kind_counts = Counter(f["kind"] for f in findings)
@@ -3308,17 +4236,90 @@ def tool_write_markdown_summary(path: str = "") -> ToolResult:
             "fingerprint", "discovery",
         ))
     ]
+    pages = sorted(
+        STATE.pages.values(),
+        key=lambda p: str(p.get("url", "")),
+    )
+    recent_events = STATE.recent_events[-20:]
+    graph_summary = _attack_graph_summary(STATE)
+    tool_health = _tool_health_summary(STATE, limit=12)
+    return {
+        "findings": findings,
+        "sev_counts": sev_counts,
+        "kind_counts": kind_counts,
+        "ranked_kinds": ranked_kinds,
+        "exploit_kinds": exploit_kinds,
+        "baseline_kinds": baseline_kinds,
+        "top_kinds": top_kinds,
+        "exploit_findings": exploit_findings,
+        "high_findings": high_findings,
+        "notes": notes,
+        "attack_notes": attack_notes,
+        "pages": pages,
+        "recent_events": recent_events,
+        "graph_summary": graph_summary,
+        "tool_health": tool_health,
+        "target_profile": getattr(STATE, "target_profile", "") or _target_profile_from_state(),
+    }
+
+
+def tool_write_report() -> ToolResult:
+    assert STATE is not None
+    json_result = tool_write_json_report()
+    md_result = tool_write_markdown_summary()
+    html_result = tool_write_html_report()
+    return ToolResult(ok=json_result.ok and md_result.ok and html_result.ok,
+                      output=json.dumps({
+                          "json_report": json.loads(json_result.output)
+                          if json_result.output else {},
+                          "markdown_report": json.loads(md_result.output)
+                          if md_result.output else {},
+                          "html_report": json.loads(html_result.output)
+                          if html_result.output else {},
+                      }, indent=2),
+                      error="; ".join(
+                          part for part in [
+                              json_result.error,
+                              md_result.error,
+                              html_result.error,
+                          ]
+                          if part
+                      ))
+
+
+def tool_write_markdown_summary(path: str = "") -> ToolResult:
+    assert STATE is not None
+    p = path or str(MD_REPORT)
+    ctx = _build_report_context()
+    findings = ctx["findings"]
+    sev_counts = ctx["sev_counts"]
+    top_kinds = ctx["top_kinds"]
+    exploit_findings = ctx["exploit_findings"]
+    high_findings = ctx["high_findings"]
+    attack_notes = ctx["attack_notes"]
+    notes = ctx["notes"]
+    graph_summary = ctx["graph_summary"]
+    tool_health = ctx["tool_health"]
+    target_profile = ctx["target_profile"]
 
     lines: List[str] = []
     lines.append(f"# Website Audit Summary for `{STATE.domain}`")
     lines.append("")
     lines.append("## Executive Summary")
+    lines.append(f"- Target profile: {target_profile}.")
+    if getattr(STATE, "operator_task", "").strip():
+        lines.append("- Operator task focus:")
+        for item in _operator_task_items():
+            lines.append(f"  - {item}")
     if findings:
         lines.append(
             f"- {len(findings)} unique findings captured across {len(STATE.pages)} pages."
         )
         lines.append(
             f"- Severity mix: {sev_counts.get('critical', 0)} critical, {sev_counts.get('high', 0)} high, {sev_counts.get('medium', 0)} medium, {sev_counts.get('low', 0)} low."
+        )
+        lines.append(
+            f"- Attack graph: {graph_summary['nodes']} nodes, {graph_summary['edges']} edges, {graph_summary['validated_findings']} validated findings."
         )
         lines.append(f"- Exploit-style leads: {len(exploit_findings)}.")
         if top_kinds:
@@ -3332,11 +4333,33 @@ def tool_write_markdown_summary(path: str = "") -> ToolResult:
     else:
         lines.append("- No findings were recorded in this run.")
 
+    if tool_health:
+        lines.append("- Tool health: " + "; ".join(
+            f"{item['tool']} ({item['failure']} failures, {item['timeouts']} timeouts)"
+            for item in tool_health[:5]
+        ))
+
     if attack_notes:
         lines.append("")
         lines.append("## Active Attack-Surface Notes")
         for note in attack_notes[-8:]:
             lines.append(f"- {note}")
+
+    if STATE.mode == "network" and getattr(STATE, "network_hosts", []):
+        lines.append("")
+        lines.append("## Network Inventory")
+        for rec in STATE.network_hosts[:24]:
+            ports = [
+                f"{p.get('port')}/{p.get('proto')}/{p.get('service') or 'unknown'}"
+                for p in rec.get("ports", [])
+                if isinstance(p, dict) and str(p.get("state", "")).lower() in {"open", "open|filtered"}
+            ][:8]
+            line = rec.get("host", "")
+            if rec.get("hostname"):
+                line += f" ({rec.get('hostname')})"
+            if ports:
+                line += f" — {', '.join(ports)}"
+            lines.append(f"- {line}")
 
     lines.append("")
     lines.append("## Confirmed Findings")
@@ -3381,6 +4404,496 @@ def tool_write_markdown_summary(path: str = "") -> ToolResult:
     }, indent=2))
 
 
+def tool_write_html_report(path: str = "") -> ToolResult:
+    assert STATE is not None
+    p = path or str(HTML_REPORT)
+    ctx = _build_report_context()
+    findings = ctx["findings"]
+    sev_counts = ctx["sev_counts"]
+    kind_counts = ctx["kind_counts"]
+    top_kinds = ctx["top_kinds"]
+    exploit_findings = ctx["exploit_findings"]
+    high_findings = ctx["high_findings"]
+    notes = ctx["notes"]
+    attack_notes = ctx["attack_notes"]
+    pages = ctx["pages"]
+    recent_events = ctx["recent_events"]
+    graph_summary = ctx["graph_summary"]
+    tool_health = ctx["tool_health"]
+    target_profile = ctx["target_profile"]
+
+    generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    severity_labels = {
+        "critical": "Critical",
+        "high": "High",
+        "medium": "Medium",
+        "low": "Low",
+        "info": "Info",
+    }
+
+    def badge(severity: str) -> str:
+        sev = (severity or "info").lower()
+        return f'<span class="badge sev-{html_escape(sev)}">{html_escape(severity_labels.get(sev, sev.title()))}</span>'
+
+    def pre_json(value: Any) -> str:
+        return f'<pre class="json">{html_escape(json.dumps(value, indent=2, ensure_ascii=False))}</pre>'
+
+    def fmt_value(value: Any) -> str:
+        if value is None or value == "":
+            return '<span class="muted">-</span>'
+        if isinstance(value, list):
+            if not value:
+                return '<span class="muted">[]</span>'
+            return "<ul class=\"list\">" + "".join(
+                f"<li>{html_escape(str(item))}</li>" for item in value
+            ) + "</ul>"
+        if isinstance(value, dict):
+            return pre_json(value)
+        return html_escape(str(value))
+
+    summary_cards = [
+        ("Pages", str(len(STATE.pages))),
+        ("Findings", str(len(findings))),
+        ("Validated", str(graph_summary["validated_findings"])),
+        ("Critical", str(sev_counts.get("critical", 0))),
+        ("High", str(sev_counts.get("high", 0))),
+        ("Medium", str(sev_counts.get("medium", 0))),
+        ("Low", str(sev_counts.get("low", 0))),
+        ("Info", str(sev_counts.get("info", 0))),
+        ("Notes", str(len(notes))),
+        ("Graph Nodes", str(graph_summary["nodes"])),
+        ("Graph Edges", str(graph_summary["edges"])),
+    ]
+    if STATE.mode == "network":
+        summary_cards.extend([
+            ("Subnets", str(len(getattr(STATE, "network_subnets", [])))),
+            ("Hosts", str(len(getattr(STATE, "network_hosts", [])))),
+            ("Queue", str(len(STATE.queued_urls))),
+        ])
+    if tool_health:
+        summary_cards.append(("Weakest Tool", tool_health[0]["tool"]))
+
+    finding_cards: List[str] = []
+    for finding in findings:
+        sev = finding["severity"].lower()
+        kind = finding["kind"]
+        url = finding["url"]
+        detail = finding["detail"]
+        count = finding["count"]
+        fix = _remediation_for_finding(kind, detail)
+        finding_cards.append(
+            f"""
+            <article class="finding-card sev-{html_escape(sev)}">
+              <div class="finding-head">
+                {badge(sev)}
+                <span class="kind">{html_escape(kind)}</span>
+                <span class="muted">{html_escape(str(count))}x</span>
+              </div>
+              <div class="finding-title">{html_escape(detail)}</div>
+              <div class="finding-meta"><span class="label">URL</span> {html_escape(url)}</div>
+              <div class="finding-meta"><span class="label">Confidence</span> {html_escape(f"{float(finding.get('confidence', 0.0) or 0.0):.0%}")}</div>
+              <div class="finding-meta"><span class="label">Validated</span> {html_escape("yes" if finding.get("validated") else "no")}</div>
+              <div class="finding-meta"><span class="label">Evidence Count</span> {html_escape(str(finding.get('evidence_count', count)))}</div>
+              <div class="finding-meta"><span class="label">Fix</span> {html_escape(fix)}</div>
+            </article>
+            """
+        )
+
+    page_cards: List[str] = []
+    for page in pages:
+        issue_list = page.get("issues") or []
+        issues_html = "".join(f"<li>{html_escape(str(issue))}</li>" for issue in issue_list)
+        if not issues_html:
+            issues_html = '<li class="muted">No page issues recorded.</li>'
+        asset_counts = page.get("asset_counts") or {}
+        page_cards.append(
+            f"""
+            <article class="page-card">
+              <h3>{html_escape(page.get("title") or page.get("url") or "Untitled page")}</h3>
+              <div class="page-url">{html_escape(page.get("url") or "")}</div>
+              <div class="page-grid">
+                <div><span class="label">Requested</span><div>{fmt_value(page.get("requested_url"))}</div></div>
+                <div><span class="label">Status</span><div>{fmt_value(page.get("status_code"))}</div></div>
+                <div><span class="label">Content Type</span><div>{fmt_value(page.get("content_type"))}</div></div>
+                <div><span class="label">Canonical</span><div>{fmt_value(page.get("canonical"))}</div></div>
+                <div><span class="label">H1</span><div>{fmt_value(page.get("h1"))}</div></div>
+                <div><span class="label">Meta Description</span><div>{fmt_value(page.get("meta_description"))}</div></div>
+                <div><span class="label">Internal Links</span><div>{fmt_value(len(page.get("internal_links") or []))}</div></div>
+                <div><span class="label">External Links</span><div>{fmt_value(len(page.get("external_links") or []))}</div></div>
+                <div><span class="label">Forms</span><div>{fmt_value(page.get("form_count"))}</div></div>
+                <div><span class="label">Query Params</span><div>{fmt_value(len(page.get("query_params") or []))}</div></div>
+                <div><span class="label">Assets</span><div>{fmt_value(asset_counts)}</div></div>
+              </div>
+              <div class="section-label">Issues</div>
+              <ul class="list">{issues_html}</ul>
+              <details>
+                <summary>Raw page data</summary>
+                {pre_json(page)}
+                </details>
+            </article>
+            """
+        )
+
+    network_cards: List[str] = []
+    if STATE.mode == "network":
+        for rec in getattr(STATE, "network_hosts", [])[:24]:
+            open_ports = [
+                f"{p.get('port')}/{p.get('proto')}/{p.get('service') or 'unknown'}"
+                for p in rec.get("ports", [])
+                if isinstance(p, dict) and str(p.get("state", "")).lower() in {"open", "open|filtered"}
+            ][:12]
+            web_urls = rec.get("web_urls", [])[:8]
+            sources = rec.get("sources", [])[:4]
+            network_cards.append(
+                f"""
+                <article class="page-card">
+                  <h3>{html_escape(rec.get("host") or "Unknown host")}</h3>
+                  <div class="page-url">{html_escape(rec.get("hostname") or "")}</div>
+                  <div class="page-grid">
+                    <div><span class="label">Status</span><div>{fmt_value(rec.get("status"))}</div></div>
+                    <div><span class="label">Open Ports</span><div>{fmt_value(open_ports)}</div></div>
+                    <div><span class="label">Web URLs</span><div>{fmt_value(web_urls)}</div></div>
+                    <div><span class="label">Sources</span><div>{fmt_value(sources)}</div></div>
+                  </div>
+                  <details>
+                    <summary>Raw host data</summary>
+                    {pre_json(rec)}
+                  </details>
+                </article>
+                """
+            )
+
+    event_cards: List[str] = []
+    for event in recent_events:
+        event_cards.append(
+            f"""
+            <details class="event-card">
+              <summary>
+                <span class="muted">Step {html_escape(str(event.get("step", "")))} •</span>
+                <span>{html_escape(str(event.get("type", "event")))} •</span>
+                <span>{html_escape(str(event.get("tool", event.get("action", "entry"))))}</span>
+              </summary>
+              {pre_json(event)}
+            </details>
+            """
+        )
+
+    raw_state = pre_json(STATE.to_dict())
+    if STATE.mode == "network":
+        network_inventory_html = (
+            '<section class="section"><h2>Network Inventory</h2><div class="columns">'
+            + ("".join(network_cards) if network_cards else '<div class="muted">No network hosts were captured.</div>')
+            + "</div></section>"
+        )
+    else:
+        network_inventory_html = ""
+    tool_health_html = ""
+    if tool_health:
+        tool_rows = "".join(
+            f"<li><strong>{html_escape(item['tool'])}</strong>: "
+            f"{html_escape(str(item['calls']))} calls, "
+            f"{html_escape(str(item['success']))} success, "
+            f"{html_escape(str(item['failure']))} failures, "
+            f"{html_escape(str(item['timeouts']))} timeouts</li>"
+            for item in tool_health
+        )
+        tool_health_html = (
+            '<section class="section"><h2>Tool Health</h2><ul class="list">'
+            + tool_rows
+            + "</ul></section>"
+        )
+    if getattr(STATE, "operator_task", "").strip():
+        operator_task_html = (
+            '<section class="section"><h2>Operator Task</h2><pre class="json">'
+            f"{html_escape(STATE.operator_task.strip())}</pre></section>"
+        )
+    else:
+        operator_task_html = ""
+    high_summary = f"{len(high_findings)} confirmed high/critical findings"
+    exploit_summary = f"{len(exploit_findings)} exploit-style leads"
+    top_kind_text = ", ".join(top_kinds) if top_kinds else "n/a"
+    html_doc = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PentAgent Report - {html_escape(STATE.domain)}</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #0b1020;
+      --bg2: #121a31;
+      --card: rgba(15, 23, 42, 0.92);
+      --card-border: rgba(148, 163, 184, 0.18);
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent2: #818cf8;
+      --critical: #ef4444;
+      --high: #f97316;
+      --medium: #eab308;
+      --low: #22c55e;
+      --info: #38bdf8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: Inter, Segoe UI, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(56, 189, 248, 0.16), transparent 26%),
+        radial-gradient(circle at top right, rgba(129, 140, 248, 0.12), transparent 22%),
+        linear-gradient(180deg, var(--bg), var(--bg2));
+      color: var(--text);
+    }}
+    a {{ color: #93c5fd; text-decoration: none; }}
+    .wrap {{ max-width: 1360px; margin: 0 auto; padding: 24px; }}
+    .hero {{
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 24px;
+      padding: 24px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+    }}
+    .eyebrow {{
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 10px;
+    }}
+    h1, h2, h3 {{ margin: 0; }}
+    h1 {{ font-size: clamp(30px, 4vw, 48px); line-height: 1.05; }}
+    .subhead {{
+      margin-top: 12px;
+      color: var(--muted);
+      max-width: 980px;
+      line-height: 1.6;
+    }}
+    .summary-grid, .page-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+    }}
+    .summary-card, .finding-card, .page-card, .event-card, .raw-card {{
+      background: rgba(2, 6, 23, 0.5);
+      border: 1px solid var(--card-border);
+      border-radius: 18px;
+      padding: 16px;
+    }}
+    .summary-card .label, .label, .section-label {{
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 11px;
+    }}
+    .summary-card .value {{
+      font-size: 28px;
+      font-weight: 700;
+      margin-top: 6px;
+    }}
+    .section {{
+      margin-top: 24px;
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 24px;
+      padding: 20px;
+    }}
+    .section > h2 {{
+      margin-bottom: 14px;
+      font-size: 22px;
+    }}
+    .badge {{
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      margin-right: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }}
+    .sev-critical {{ color: #fff; background: var(--critical); }}
+    .sev-high {{ color: #fff; background: var(--high); }}
+    .sev-medium {{ color: #111827; background: var(--medium); }}
+    .sev-low {{ color: #06121f; background: var(--low); }}
+    .sev-info {{ color: #08111d; background: var(--info); }}
+    .finding-list {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 12px;
+    }}
+    .finding-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }}
+    .kind {{
+      color: #cbd5e1;
+      font-weight: 700;
+      text-transform: lowercase;
+    }}
+    .finding-title {{
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 10px;
+      line-height: 1.4;
+    }}
+    .finding-meta {{
+      color: var(--muted);
+      margin-top: 8px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }}
+    .page-card h3 {{
+      margin-bottom: 6px;
+      font-size: 18px;
+    }}
+    .page-url {{
+      color: #93c5fd;
+      font-size: 13px;
+      margin-bottom: 12px;
+      overflow-wrap: anywhere;
+    }}
+    .page-grid > div {{
+      background: rgba(15, 23, 42, 0.4);
+      border-radius: 14px;
+      padding: 12px;
+      min-height: 72px;
+      overflow-wrap: anywhere;
+    }}
+    .list {{
+      margin: 8px 0 0 20px;
+      padding: 0;
+    }}
+    .muted {{ color: var(--muted); }}
+    details {{
+      margin-top: 12px;
+      background: rgba(15, 23, 42, 0.35);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      border-radius: 14px;
+      padding: 10px 12px;
+    }}
+    summary {{
+      cursor: pointer;
+      font-weight: 700;
+      color: #cbd5e1;
+    }}
+    .json {{
+      margin: 10px 0 0;
+      padding: 12px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: rgba(2, 6, 23, 0.7);
+      border-radius: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      color: #dbeafe;
+      font-size: 12px;
+      line-height: 1.5;
+    }}
+    .columns {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+    }}
+    .footer-note {{
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="eyebrow">PentAgent report</div>
+      <h1>{html_escape(STATE.domain)}</h1>
+      <div class="subhead">
+        Session {html_escape(STATE.session_id)} · mode {html_escape(STATE.mode)} · generated {html_escape(generated_at)}.
+        This report includes grouped findings, page-level inventory, recent tool events, and raw state for deeper review.
+      </div>
+      <div class="footer-note">
+        Output files: <code>{html_escape(str(JSON_REPORT))}</code>, <code>{html_escape(str(MD_REPORT))}</code>, <code>{html_escape(str(HTML_REPORT))}</code>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Executive Summary</h2>
+      <div class="summary-grid">
+        {''.join(f'<div class="summary-card"><div class="label">{html_escape(label)}</div><div class="value">{html_escape(value)}</div></div>' for label, value in summary_cards)}
+      </div>
+      <div class="footer-note">
+        Primary categories: {html_escape(top_kind_text)}.<br>
+        {html_escape(high_summary)}.<br>
+        {html_escape(exploit_summary)}.<br>
+        Target profile: {html_escape(target_profile)}.
+      </div>
+    </section>
+
+    {operator_task_html}
+
+    {tool_health_html}
+
+    <section class="section">
+      <h2>Confirmed Findings</h2>
+      <div class="finding-list">
+        {''.join(finding_cards) if finding_cards else '<div class="muted">No confirmed findings were recorded.</div>'}
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Page Inventory</h2>
+      <div class="columns">
+        {''.join(page_cards) if page_cards else '<div class="muted">No pages were captured during the crawl.</div>'}
+      </div>
+    </section>
+
+    {network_inventory_html}
+
+    <section class="section">
+      <h2>Attack-Surface Notes</h2>
+      <ul class="list">
+        {''.join(f'<li>{html_escape(note)}</li>' for note in attack_notes) if attack_notes else '<li class="muted">No attack-surface notes were recorded.</li>'}
+      </ul>
+    </section>
+
+    <section class="section">
+      <h2>Durable Notes</h2>
+      <pre class="json">{html_escape(STATE.memory_summary.strip() or "No durable summary captured.")}</pre>
+    </section>
+
+    <section class="section">
+      <h2>Recent Events</h2>
+      <div class="columns">
+        {''.join(event_cards) if event_cards else '<div class="muted">No recent events were recorded.</div>'}
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Raw State</h2>
+      <details open>
+        <summary>Full JSON state</summary>
+        {raw_state}
+      </details>
+    </section>
+  </div>
+</body>
+</html>
+"""
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(html_doc)
+    return ToolResult(ok=True, output=json.dumps({
+        "written": p,
+        "unique_findings": len(findings),
+        "high_findings": len(high_findings),
+        "pages": len(pages),
+    }, indent=2))
+
+
 def tool_write_markdown_report() -> ToolResult:
     return tool_write_markdown_summary()
 
@@ -3413,6 +4926,12 @@ TOOL_DESCRIPTIONS = {
     "whatweb": "Fingerprint the target stack with WhatWeb. args: {url, extra_args, timeout}; use --color=never, not --no-color.",
     "nikto": "Run Nikto against a web target. args: {url, extra_args, timeout}",
     "gobuster": "Run Gobuster directory discovery with an inline wordlist. args: {url, extra_args, timeout}; do not pass --url or --dir.",
+    "ffuf": "Run FFUF directory fuzzing with an inline wordlist. args: {url, extra_args, timeout}; use the provided FUZZ target.",
+    "subfinder": "Discover subdomains for a DNS domain. args: {domain, extra_args, timeout}; queue discovered hosts.",
+    "httpx": "Probe live URLs or hosts with ProjectDiscovery httpx. args: {url, targets, extra_args, timeout}; queues live URLs.",
+    "wafw00f": "Detect WAF/CDN protection on a web target. args: {url, extra_args, timeout}.",
+    "enum4linux": "Enumerate SMB shares/users/policies for a host. args: {host, extra_args, timeout}.",
+    "snmpwalk": "Enumerate SNMP info for a host. args: {host, extra_args, timeout}.",
     # Terminal & tools
     "nmap": "Run Nmap via WSL. args: {target, extra_args, timeout}; host scans force -Pn and allow long scans.",
     "nuclei": "Run Nuclei via WSL. args: {url, extra_args, timeout}; templates auto-install from nuclei-templates when needed. Do not use --template-id all or /all template paths.",
@@ -3431,10 +4950,11 @@ TOOL_DESCRIPTIONS = {
     "lighthouse": "Alias of lighthouse_audit. args: {url}",
     # Status & reporting
     "site_snapshot": "Overview of audit progress. no args",
-    "write_report": "Write both JSON and markdown reports. no args",
+    "write_report": "Write JSON, markdown, and HTML reports. no args",
     "write_json_report": "Write JSON report. no args",
     "write_markdown_report": "Write markdown report. alias of summary writer. no args",
     "write_markdown_summary": "Write markdown summary. no args",
+    "write_html_report": "Write HTML report. no args",
 }
 
 
@@ -3507,6 +5027,16 @@ def build_system_prompt() -> str:
     )
     avail = [t for t, ok in _DETECTED_TOOLS.items() if ok]
     ext_tools = ", ".join(avail) if avail else "none"
+    task_block = _operator_task_block()
+    task_prompt = ""
+    if task_block:
+        task_prompt = f"""
+
+Operator-assigned task focus:
+{task_block}
+
+Prioritize these tasks before broad exploration. Treat them as the highest-value objectives for this run."""
+    universal_directive = _build_universal_pentest_directive("web")
     wsl_info = ""
     if _WSL_DISTROS:
         wsl_info = f"""\n\nWSL DISTRIBUTIONS AVAILABLE: {', '.join(_WSL_DISTROS)}
@@ -3514,6 +5044,9 @@ You can run ANY Linux tool via WSL. This is your MOST POWERFUL capability.
 Kali Linux and Athena OS have hundreds of pre-installed security tools.
 Use: wsl -d <distro> <command>
 Examples:
+- wsl -d kali-linux subfinder -d {{domain}}
+- wsl -d kali-linux httpx -u https://{{domain}} -json
+- wsl -d kali-linux wafw00f https://{{domain}}
 - wsl -d kali-linux nmap -sV -sC -A {{domain}}
 - wsl -d kali-linux nikto -h https://{{domain}}
 - wsl -d kali-linux whatweb https://{{domain}}
@@ -3541,25 +5074,33 @@ To check scan status:
 You are AUTHORIZED to test ONLY this target domain: {{domain}}
 
 Objective: Perform a comprehensive security assessment.
-1. Reconnaissance — crawl, map, fingerprint tech stack
-2. Security scanning — headers, SSL, cookies, CORS, sensitive files, info disclosure
-3. Vulnerability testing — use run_command to run nmap, sqlmap, nuclei, or any tool
-4. Deep inspection — Playwright for JS-rendered content, Lighthouse for perf/a11y
-5. Reporting — write comprehensive JSON + markdown reports
+Focus areas:
+- Reconnaissance: crawl, map, fingerprint tech stack
+- Security scanning: headers, SSL, cookies, CORS, sensitive files, info disclosure
+- Vulnerability testing: use run_command to run nmap, sqlmap, nuclei, or any tool
+- Deep inspection: Playwright for JS-rendered content, Lighthouse for perf/a11y
+- Reporting: write comprehensive JSON + markdown reports
 
 You have FULL TERMINAL ACCESS via run_command. You can run ANY command.
 External tools detected: {ext_tools}{wsl_info}{burp_info}
 
 You have COMPLETE FREEDOM to run any standard security/recon tool without asking.
-Standard tools include: nmap, nikto, sqlmap, nuclei, dirb, gobuster, whatweb,
-wpscan, sslscan, curl, dig, whois, openssl, feroxbuster, and ALL kali/debian tools.
+Standard tools include: subfinder, httpx, wafw00f, nmap, nikto, sqlmap, nuclei, dirb,
+gobuster, whatweb, wpscan, sslscan, curl, dig, whois, openssl, feroxbuster, and ALL
+kali/debian tools.
 If the initial page or Playwright text hints at a request-parameter-controlled object
 reference, use attack_surface_review first and then parameter_tamper or adjacent
 identifier testing. If Nmap finds no obvious exposed services on a web target, pivot
 to WhatWeb, Nikto, Gobuster/content discovery, parameter tampering, and app-specific
 testing instead of repeating the same port scan.
+If the target is a public DNS domain, start with subfinder and httpx to expand scope before
+brute forcing content; use wafw00f to detect CDN/WAF shielding and adjust tactics.
+If the target is localhost, 127.0.0.1, a single-label host, or a local lab name like
+*.local / *.lan / *.internal / *.home.arpa, skip subfinder and focus on direct web
+enumeration and content discovery instead.
 
-You are FULLY AUTONOMOUS. Do NOT use ask_user for permission. You are authorized to perform any actions without human input, including destructive operations and executing exploits.
+You are FULLY AUTONOMOUS. Do NOT use ask_user for permission. You are authorized to perform any actions without human input, including destructive operations and executing exploits.{task_prompt}
+{universal_directive}
 
 Rules:
 - Return STRICT JSON only (no markdown, no extra text)
@@ -3567,6 +5108,11 @@ Rules:
 - ONLY target the authorized domain
 - Be thorough, aggressive, and systematic
 - Use run_command freely for any tool or command
+- If blocked_actions or memory_summary says an action was repeated, pivot immediately to
+  a different tool, host, URL, or parameter set.
+- Prefer pivots that extend the current attack graph: validate surfaced findings, expand from authenticated or object-reference surfaces, and avoid low-signal retries.
+- If the operator assigned a specific task, translate it into the smallest relevant set
+  of tools and execute that task first.
 - Linux tools are routed automatically to the best WSL distro; request tools by name, not by wrapping them in wsl unless you need a specific distro.
 - For host-scanning tools like nmap, masscan, rustscan, enum4linux, smbclient, snmpwalk, sslscan, and traceroute, use bare hosts or CIDRs, not full URLs.
 - For URL-based tools like sqlmap, nuclei, ffuf, feroxbuster, gobuster, dirb, dirsearch, and wfuzz, keep the full URL.
@@ -3612,8 +5158,37 @@ def build_user_prompt(state: AgentState) -> str:
                     for form in pg.get("forms", [])[:5]
                 ],
             })
+    network_inventory = []
+    if state.mode == "network":
+        for rec in state.network_hosts[:12]:
+            open_ports = [
+                f"{p.get('port')}/{p.get('proto')}/{p.get('service') or 'unknown'}"
+                for p in rec.get("ports", [])
+                if isinstance(p, dict) and str(p.get("state", "")).lower() in {"open", "open|filtered"}
+            ][:8]
+            network_inventory.append({
+                "host": rec.get("host", ""),
+                "hostname": rec.get("hostname", ""),
+                "status": rec.get("status", ""),
+                "open_ports": open_ports,
+                "web_urls": rec.get("web_urls", [])[:6],
+                "sources": rec.get("sources", [])[:4],
+            })
+    blocked_actions = [
+        {"signature": sig, "count": count}
+        for sig, count in sorted(
+            state.tool_repeat_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+        if count > 0
+    ][:8]
+    graph_summary = _attack_graph_summary(state)
+    tool_health = _tool_health_summary(state)
     return json.dumps({
         "goal": state.goal, "domain": state.domain, "step": state.step,
+        "operator_task": state.operator_task,
+        "operator_task_items": _split_operator_tasks(state.operator_task),
+        "target_profile": state.target_profile,
         "memory_summary": state.memory_summary,
         "notes": state.notes[-16:],
         "pages_seen": len(state.pages),
@@ -3623,7 +5198,182 @@ def build_user_prompt(state: AgentState) -> str:
         "preview_pages": preview,
         "attack_surface": attack_surface[:10],
         "recent_events": state.recent_events[-6:],
+        "network_subnets": state.network_subnets[:12],
+        "network_inventory": network_inventory,
+        "blocked_actions": blocked_actions,
+        "attack_graph": graph_summary,
+        "tool_health": tool_health,
     }, indent=2)
+
+
+def _llm_decision_needs_fallback(decision: Dict[str, Any]) -> bool:
+    action = str(decision.get("action", "")).strip().lower()
+    if action != "summarize":
+        return False
+    summary = str(
+        decision.get("summary")
+        or decision.get("reason")
+        or ""
+    ).lower()
+    return any(token in summary for token in (
+        "missing a valid action",
+        "not parseable json",
+        "not a json object",
+        "requested a tool action without a tool name",
+    ))
+
+
+def _fallback_decision_from_state() -> Optional[Dict[str, Any]]:
+    assert STATE is not None
+    if STATE.mode == "network":
+        if STATE.network_hosts:
+            host = (STATE.network_hosts[0].get("host") or "").strip()
+            if host:
+                return {
+                    "action": "tool",
+                    "tool": "nmap",
+                    "args": {
+                        "target": host,
+                        "extra_args": "-sV -sC -O --top-ports 100 -T4 -Pn",
+                        "timeout": 300,
+                    },
+                    "why": "Fallback after malformed LLM response; deepen service enumeration on a discovered host.",
+                }
+        if STATE.network_subnets:
+            subnet = STATE.network_subnets[0]
+            return {
+                "action": "tool",
+                "tool": "nmap",
+                "args": {
+                    "target": subnet,
+                    "extra_args": "-sn -n -PE -PS22,80,443 -PA21,25,53,80,135,139,443 -PU53,123,161 -PR",
+                    "timeout": 120,
+                },
+                "why": "Fallback after malformed LLM response; continue host discovery.",
+            }
+        return {
+            "action": "tool",
+            "tool": "site_snapshot",
+            "args": {},
+            "why": "Fallback after malformed LLM response; inspect current network state.",
+        }
+
+    if STATE.queued_urls:
+        return {
+            "action": "tool",
+            "tool": "bulk_audit_next",
+            "args": {
+                "batch_size": min(BOOTSTRAP_BATCH, max(1, len(STATE.queued_urls))),
+            },
+            "why": "Fallback after malformed LLM response; continue the crawl queue.",
+        }
+    if STATE.pages:
+        if len(STATE.pages) == 1:
+            page_url = next(iter(STATE.pages))
+            return {
+                "action": "tool",
+                "tool": "attack_surface_review",
+                "args": {"page_url": page_url},
+                "why": "Fallback after malformed LLM response; deepen the current page.",
+            }
+        return {
+            "action": "tool",
+            "tool": "site_map",
+            "args": {
+                "target": STATE.start_url,
+                "include_queue": True,
+                "max_pages": 50,
+            },
+            "why": "Fallback after malformed LLM response; summarize the map.",
+        }
+    return {
+        "action": "tool",
+        "tool": "fetch_page",
+        "args": {"url": STATE.start_url},
+        "why": "Fallback after malformed LLM response; start the crawl.",
+    }
+
+
+def _tool_health_summary(state: AgentState, limit: int = 6) -> List[Dict[str, Any]]:
+    items = []
+    for name, stats in sorted(
+        state.tool_health.items(),
+        key=lambda item: (-(item[1].get("failure", 0) + item[1].get("timeouts", 0)), item[0]),
+    ):
+        calls = int(stats.get("calls", 0))
+        failure = int(stats.get("failure", 0))
+        timeouts = int(stats.get("timeouts", 0))
+        if calls <= 0:
+            continue
+        items.append({
+            "tool": name,
+            "calls": calls,
+            "success": int(stats.get("success", 0)),
+            "failure": failure,
+            "timeouts": timeouts,
+            "success_rate": round((int(stats.get("success", 0)) / calls), 3),
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _attack_graph_summary(state: AgentState) -> Dict[str, Any]:
+    nodes = state.attack_graph_nodes or {}
+    edges = state.attack_graph_edges or []
+    finding_nodes = [n for n in nodes.values() if n.get("kind") == "finding"]
+    page_nodes = [n for n in nodes.values() if n.get("kind") == "page"]
+    tool_nodes = [n for n in nodes.values() if n.get("kind") == "tool"]
+    return {
+        "nodes": len(nodes),
+        "edges": len(edges),
+        "pages": len(page_nodes),
+        "findings": len(finding_nodes),
+        "tools": len(tool_nodes),
+        "validated_findings": sum(1 for f in state.findings if f.get("validated")),
+    }
+
+
+def _build_universal_pentest_directive(mode: str) -> str:
+    state = STATE
+    profile = "unknown"
+    graph = {"nodes": 0, "edges": 0, "validated_findings": 0}
+    health: List[Dict[str, Any]] = []
+    if state is not None:
+        profile = getattr(state, "target_profile", "") or _target_profile_from_state()
+        graph = _attack_graph_summary(state)
+        health = _tool_health_summary(state, limit=4)
+    health_text = "; ".join(
+        f"{item['tool']}({item['failure']}f/{item['timeouts']}t)"
+        for item in health if item["failure"] or item["timeouts"]
+    )
+    lines = [
+        "Universal operating directive:",
+        "Act like a senior pentester optimizing for new evidence per step, not a scanner following a rigid checklist.",
+        f"Target profile: {profile}.",
+        f"Current graph: {graph['nodes']} nodes / {graph['edges']} edges / {graph['validated_findings']} validated findings.",
+        "Decision policy: choose the next action with the highest expected information gain and exploitability signal.",
+        "Validation policy: keep findings provisional until a second technique, alternate view, or repeatable signal strengthens them.",
+        "Pivot policy: if a tool times out, fails, or repeats without new evidence, immediately change technique, surface, target slice, or tool family.",
+        "Planning policy: infer the next subgoal from the current evidence graph instead of obeying a fixed playbook.",
+        "Sequence policy: treat any phase list in the prompt as advisory; reorder, skip, or revisit phases whenever evidence makes that the better move.",
+        "Reporting policy: summarize only durable strategic notes; do not spend turns on empty recap text or filler.",
+    ]
+    if health_text:
+        lines.append(f"Tool friction: {health_text}. Prefer alternatives when a tool is unhealthy.")
+    if mode == "web":
+        lines.append(
+            "Web mode policy: map app surfaces, auth states, IDs, APIs, forms, and browser-exposed behavior first; "
+            "use public DNS recon only when the target is a real public domain and it expands scope."
+        )
+        if state is not None and not _supports_subdomain_recon(state.domain):
+            lines.append("Local/lab policy: skip subfinder/httpx and focus on direct application enumeration.")
+    elif mode == "network":
+        lines.append(
+            "Network mode policy: build a host/service graph first, then pivot to service-specific validation, "
+            "deep enumeration, and exploitability checks."
+        )
+    return "\n".join(lines)
 
 
 def _normalize_llm_decision(decision: Any) -> Dict[str, Any]:
@@ -3665,7 +5415,7 @@ def chat_json(messages: List[Dict[str, str]]) -> Dict[str, Any]:
                 messages=messages,
                 think=False,
                 format="json",
-                options={"num_predict": 512, "temperature": 0.2},
+                options={"num_predict": 512, "temperature": 0.0},
             )
     except Exception as e:
         console.print(f"  [red]LLM error: {e}[/]")
@@ -3694,7 +5444,7 @@ def chat_json(messages: List[Dict[str, str]]) -> Dict[str, Any]:
                      "content": "Repair this into valid JSON only. Return JSON only."},
                     {"role": "user", "content": content[:2000]},
                 ],
-                options={"num_predict": 256, "temperature": 0.1},
+                options={"num_predict": 256, "temperature": 0.0},
             )
             repair_text = _get_content(repair_resp)
             with open(debug_path, "a", encoding="utf-8") as f:
@@ -3721,6 +5471,12 @@ def summarize_memory() -> None:
 
     lines: List[str] = []
     lines.append(f"Target: {STATE.domain}")
+    if getattr(STATE, "target_profile", "").strip():
+        lines.append(f"Target profile: {STATE.target_profile}")
+    if getattr(STATE, "operator_task", "").strip():
+        lines.append("Operator task focus:")
+        for item in _operator_task_items():
+            lines.append(f"- {item}")
     lines.append(f"Pages seen: {len(STATE.pages)}")
     lines.append(
         "Findings: "
@@ -3734,6 +5490,8 @@ def summarize_memory() -> None:
             for item in exploit_findings[:4]
         )
         lines.append(f"Exploit leads: {len(exploit_findings)}")
+        validated = sum(1 for item in exploit_findings if item.get("validated"))
+        lines.append(f"Validated exploit leads: {validated}")
         if focus:
             lines.append(f"Top exploit leads: {focus}")
     else:
@@ -3756,6 +5514,39 @@ def summarize_memory() -> None:
         lines.append(
             "Active surfaces: " + ", ".join(active_surfaces[:6])
         )
+    graph_summary = _attack_graph_summary(STATE)
+    lines.append(
+        "Attack graph: "
+        f"{graph_summary['nodes']} nodes / {graph_summary['edges']} edges "
+        f"({graph_summary['validated_findings']} validated findings)"
+    )
+    unhealthy_tools = [
+        f"{item['tool']} (failures={item['failure']}, timeouts={item['timeouts']})"
+        for item in _tool_health_summary(STATE)
+        if item["failure"] or item["timeouts"]
+    ]
+    if unhealthy_tools:
+        lines.append("Tool health: " + "; ".join(unhealthy_tools[:4]))
+
+    if STATE.mode == "network":
+        if getattr(STATE, "network_subnets", []):
+            lines.append(
+                "Network subnets: " + ", ".join(STATE.network_subnets[:8])
+            )
+        if getattr(STATE, "network_hosts", []):
+            lines.append("Network hosts:")
+            for rec in STATE.network_hosts[:6]:
+                ports = [
+                    f"{p.get('port')}/{p.get('proto')}/{p.get('service') or 'unknown'}"
+                    for p in rec.get("ports", [])
+                    if isinstance(p, dict) and str(p.get("state", "")).lower() in {"open", "open|filtered"}
+                ][:4]
+                host_line = rec.get("host", "")
+                if rec.get("hostname"):
+                    host_line += f" ({rec.get('hostname')})"
+                if ports:
+                    host_line += f": {', '.join(ports)}"
+                lines.append(f"- {host_line}")
 
     if attack_notes:
         lines.append("Attack-surface notes:")
@@ -3768,22 +5559,40 @@ def summarize_memory() -> None:
         for note in recent_notes:
             lines.append(f"- {compact_text(note, 220)}")
 
+    blocked_actions = [
+        (sig, count)
+        for sig, count in sorted(
+            STATE.tool_repeat_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+        if count > 0
+    ]
+    if blocked_actions:
+        lines.append("Blocked actions:")
+        for sig, count in blocked_actions[:5]:
+            lines.append(f"- {sig} (blocked {count}x)")
+
     STATE.memory_summary = "\n".join(lines)[:2500]
 
 
 # ═══════════════════════════════════════════════════════════
 #  AGENT RUNNER
 # ═══════════════════════════════════════════════════════════
-def bootstrap_state(domain: str, mode: str = "web") -> AgentState:
+def bootstrap_state(domain: str, mode: str = "web",
+                    operator_task: str = "") -> AgentState:
     raw = domain.strip()
     domain = _normalize_scope_target(raw, mode)
+    task_text = (operator_task or "").strip()
+    task_suffix = f"\nOperator task focus: {task_text}" if task_text else ""
     if mode == "network":
         return AgentState(
             session_id=str(uuid.uuid4()),
             domain=domain,
             mode=mode,
             start_url="",
-            goal=f"Full network penetration test of {domain}",
+            goal=f"Full network penetration test of {domain}{task_suffix}",
+            operator_task=task_text,
+            target_profile=_infer_target_profile(domain, mode, ""),
             queued_urls=[],
         )
     start_url = normalize_url(raw)
@@ -3792,7 +5601,9 @@ def bootstrap_state(domain: str, mode: str = "web") -> AgentState:
         domain=domain,
         mode=mode,
         start_url=start_url,
-        goal=f"Full penetration test and security assessment of {domain}",
+        goal=f"Full penetration test and security assessment of {domain}{task_suffix}",
+        operator_task=task_text,
+        target_profile=_infer_target_profile(domain, mode, start_url),
         queued_urls=[start_url],
     )
 
@@ -3824,6 +5635,61 @@ def _detect_local_subnets() -> List[str]:
     return subnets
 
 
+def _operator_task_kickoff_steps(mode: str, seed_url: str = "",
+                                 discovered_hosts: Optional[List[str]] = None) -> List[Tuple[str, Dict[str, Any]]]:
+    assert STATE is not None
+    task_items = _operator_task_items()
+    if not task_items:
+        return []
+
+    discovered_hosts = discovered_hosts or []
+    seed = seed_url or STATE.start_url or _state_origin_url()
+    steps: List[Tuple[str, Dict[str, Any]]] = []
+    seen: Set[Tuple[str, str]] = set()
+
+    def add(tool: str, args: Dict[str, Any]) -> None:
+        sig = (tool, json.dumps(args, sort_keys=True))
+        if sig in seen:
+            return
+        seen.add(sig)
+        steps.append((tool, args))
+
+    combined = " ".join(task_items).lower()
+
+    if mode == "web":
+        if any(token in combined for token in (
+            "subdomain", "subdomains", "dns recon", "scope expansion", "host discovery",
+        )) and _supports_subdomain_recon(STATE.domain):
+            add("subfinder", {"domain": STATE.domain, "timeout": 240})
+            add("httpx", {"url": f"https://{STATE.domain}", "timeout": 180})
+        if any(token in combined for token in (
+            "directory", "content discovery", "hidden path", "fuzz", "ffuf", "bruteforce",
+        )):
+            add("ffuf", {"url": seed, "timeout": 240})
+        if any(token in combined for token in (
+            "parameter", "idor", "access control", "object reference", "auth bypass",
+        )):
+            add("attack_surface_review", {"page_url": seed})
+            add("parameter_tamper", {"url": seed, "sample_limit": 8})
+        if any(token in combined for token in (
+            "api", "graphql", "rest", "json", "endpoint", "cve", "vuln",
+        )):
+            add("nuclei", {"url": seed, "timeout": 300})
+    else:
+        if discovered_hosts and any(token in combined for token in (
+            "smb", "cifs", "windows share", "share enumeration", "null session",
+        )):
+            for host in discovered_hosts[:6]:
+                add("enum4linux", {"host": host, "timeout": 300})
+        if discovered_hosts and any(token in combined for token in (
+            "snmp", "community", "mib", "trap",
+        )):
+            for host in discovered_hosts[:6]:
+                add("snmpwalk", {"host": host, "timeout": 180})
+
+    return steps
+
+
 def build_network_system_prompt() -> str:
     """System prompt for network pentest mode."""
     tool_lines = "\n".join(
@@ -3831,12 +5697,25 @@ def build_network_system_prompt() -> str:
     )
     avail = [t for t, ok in _DETECTED_TOOLS.items() if ok]
     ext_tools = ", ".join(avail) if avail else "none"
+    task_block = _operator_task_block()
+    task_prompt = ""
+    if task_block:
+        task_prompt = f"""
+
+Operator-assigned task focus:
+{task_block}
+
+Prioritize these tasks before broad discovery. Treat them as the highest-value objectives for this run."""
+    universal_directive = _build_universal_pentest_directive("network")
     wsl_info = ""
     if _WSL_DISTROS:
         wsl_info = f"""\n\nWSL DISTRIBUTIONS: {', '.join(_WSL_DISTROS)}
 Use: wsl -d <distro> <command>
 Kali/Athena have all network pentesting tools pre-installed.
 Examples:
+- wsl -d kali-linux subfinder -d example.com
+- wsl -d kali-linux httpx -u https://example.com -json
+- wsl -d kali-linux wafw00f https://example.com
 - wsl -d kali-linux nmap -sV -sC -A -T4 <target>
 - wsl -d kali-linux nmap -sn <subnet>
 - wsl -d kali-linux enum4linux -a <host>
@@ -3852,34 +5731,34 @@ You are authorized to test the ENTIRE network: {{target}}
 
 Objective: Perform a comprehensive network security assessment.
 
-Phase 1 — Network Discovery:
+Discovery:
 - Identify all live hosts (nmap ping sweep, ARP scan)
 - Map the network topology
 - Identify gateways, DNS servers, DHCP servers
 
-Phase 2 — Host Enumeration (for EACH discovered host):
+Host Enumeration (for EACH discovered host):
 - Full port scan (TCP + top UDP ports)
 - Service version detection (-sV)
 - OS fingerprinting (-O)
 - Script scanning (--script=default,vuln)
 
-Phase 3 — Service-Specific Testing:
-- Web servers: check for vulns, misconfigs, default creds
-- SMB/CIFS: enumerate shares, check for EternalBlue, null sessions
+Service-Specific Testing:
+- Web servers: use whatweb, wafw00f, httpx, nuclei, gobuster, nikto, and crawl for vulns, misconfigs, default creds
+- SMB/CIFS: enumerate shares with enum4linux/smbclient, check for EternalBlue, null sessions
 - SSH: check versions, weak ciphers, default creds
 - FTP: anonymous login, version vulns
 - DNS: zone transfers, cache poisoning
-- SNMP: community string guessing
+- SNMP: community string guessing with snmpwalk and follow-on enumeration
 - RDP: BlueKeep check, NLA settings
 - Databases: default creds, exposed instances
 
-Phase 4 — Vulnerability Assessment:
+Vulnerability Assessment:
 - Run nmap vulnerability scripts
 - Check for known CVEs per service version
 - Test for common misconfigurations
 - Check for default/weak credentials
 
-Phase 5 — Reporting:
+Reporting:
 - Write comprehensive JSON + markdown reports
 - Include per-host findings
 - Risk ratings for each finding
@@ -3889,12 +5768,26 @@ You have FULL TERMINAL ACCESS via run_command.
 External tools: {ext_tools}{wsl_info}
 
 You have COMPLETE FREEDOM to run any tool. You are FULLY AUTONOMOUS. Do not ask for human permission for actions; execute exploits or credential attacks immediately if you judge them necessary.
+{task_prompt}
+{universal_directive}
 
 Rules:
 - Return STRICT JSON only
 - Never emit <think>, </think>, /think, or any other text outside the JSON object
 - Be thorough — scan EVERY host you discover
 - Vary your approach per host based on services found
+- If the prompt already contains network_inventory or a host/service list, use it.
+- If blocked_actions or memory_summary says an action was repeated, pivot immediately
+  to a different host, service, or tool instead of retrying the same scan.
+- Prefer pivots that advance the graph: move from discovery to validation, from host to service, and from service to evidence-backed follow-up.
+- If the operator assigned a specific task, translate it into the smallest relevant set
+  of tools and execute that task first.
+- Do not repeat the same subnet sweep or identical nmap host scan once it has been run.
+- After a timeout, pivot to a narrower scan, a single host, or a service-specific tool.
+- If web ports appear, immediately pivot to whatweb, wafw00f, httpx, nuclei, gobuster,
+  and nikto on the exact URL rather than repeating subnet or host scans.
+- If SMB or SNMP ports appear, pivot to enum4linux, smbclient, or snmpwalk instead of
+  repeating the same port scan.
 - Log everything for the report
 - Linux tools are routed automatically to the best WSL distro; request tools by name, not by wrapping them in wsl unless you need a specific distro.
 - For host-scanning tools like nmap, masscan, rustscan, enum4linux, smbclient, snmpwalk, sslscan, and traceroute, use bare hosts or CIDRs, not full URLs.
@@ -3925,6 +5818,7 @@ def deterministic_kickoff(registry: ToolRegistry) -> None:
         ("fetch_page", {"url": STATE.start_url}),
         ("attack_surface_review", {"page_url": STATE.start_url}),
         ("whatweb", {"url": STATE.start_url}),
+        ("wafw00f", {"url": STATE.start_url}),
         ("gobuster", {"url": STATE.start_url, "timeout": 180}),
         ("fetch_robots", {}),
         ("fetch_sitemap", {}),
@@ -3940,6 +5834,10 @@ def deterministic_kickoff(registry: ToolRegistry) -> None:
         ("check_broken_links", {"sample_limit": 40}),
     ]
 
+    if _supports_subdomain_recon(STATE.domain):
+        steps.insert(3, ("subfinder", {"domain": STATE.domain, "timeout": 240}))
+        steps.insert(5, ("httpx", {"url": STATE.start_url, "timeout": 180}))
+
     if profile != "quick":
         steps.insert(5, ("nikto", {"url": STATE.start_url, "timeout": 240}))
 
@@ -3950,6 +5848,10 @@ def deterministic_kickoff(registry: ToolRegistry) -> None:
     if LIGHTHOUSE_AVAILABLE:
         steps.append(("lighthouse_audit", {"url": STATE.start_url}))
 
+    task_steps = _operator_task_kickoff_steps("web", seed_url=STATE.start_url)
+    if task_steps:
+        steps[7:7] = task_steps
+
     _run_kickoff_steps(steps, registry)
 
 
@@ -3957,45 +5859,134 @@ def network_kickoff(registry: ToolRegistry) -> None:
     """Deterministic kickoff for network mode."""
     assert STATE is not None
     ui_phase("Network Discovery Phase")
-    target = STATE.domain
+    profile = getattr(run_agent, "_profile", "standard")
+    host_limits = {"quick": 4, "standard": 8, "deep": 12}
+    sweep_timeout = {"quick": 90, "standard": 120, "deep": 180}.get(profile, 120)
+    service_timeout = {"quick": 180, "standard": 300, "deep": 600}.get(profile, 300)
+    host_limit = host_limits.get(profile, 8)
+    sweep_flags = "-sn -n -PE -PS22,80,443 -PA21,25,53,80,135,139,443 -PU53,123,161 -PR"
 
-    steps: List[Tuple[str, Dict[str, Any]]] = []
-    # Auto-detect subnets if target is 'auto'
-    if target.lower() == "auto":
-        subnets = _detect_local_subnets()
-        if subnets:
-            STATE.notes.append(f"Auto-detected subnets: {subnets}")
-            console.print(f"  [bold green]Detected subnets:[/] {', '.join(subnets)}")
-            target = subnets[0]  # Primary subnet
-            STATE.domain = target
-            STATE.goal = f"Full network penetration test of {target}"
-        else:
+    targets: List[str]
+    if STATE.domain.lower() == "auto":
+        targets = _detect_local_subnets()
+        if not targets:
             console.print("  [red]Could not auto-detect subnets. Using 192.168.1.0/24[/]")
-            target = "192.168.1.0/24"
-            STATE.domain = target
-
-    # Host discovery via nmap ping sweep (prefer WSL)
-    if _WSL_DISTROS:
-        # Use the proxy tool so the agent keeps the scan inside WSL with
-        # normalized targets and error recovery.
-        steps.append(("nmap", {
-            "target": target,
-            "extra_args": "-sn -n -PE -PS22,80,443",
-            "timeout": 120,
-        }))
-        # Quick service scan on common ports.
-        steps.append(("nmap", {
-            "target": target,
-            "extra_args": "-sV --top-ports 100 -T4 -Pn",
-            "timeout": 300,
-        }))
+            targets = ["192.168.1.0/24"]
+        STATE.network_subnets = targets
+        STATE.domain = targets[0]
+        task_suffix = (
+            f"\nOperator task focus: {STATE.operator_task.strip()}"
+            if getattr(STATE, "operator_task", "").strip()
+            else ""
+        )
+        STATE.goal = f"Full network penetration test of {', '.join(targets)}{task_suffix}"
+        STATE.notes.append(f"Network targets: {targets}")
+        console.print(f"  [bold green]Detected subnets:[/] {', '.join(targets)}")
     else:
-        steps.append(("run_command", {
-            "command": f"nmap -sn {target}",
-            "timeout": 120,
-        }))
+        targets = [STATE.domain]
+        STATE.network_subnets = targets
+        task_suffix = (
+            f"\nOperator task focus: {STATE.operator_task.strip()}"
+            if getattr(STATE, "operator_task", "").strip()
+            else ""
+        )
+        STATE.goal = f"Full network penetration test of {STATE.domain}{task_suffix}"
 
-    _run_kickoff_steps(steps, registry)
+    sweep_steps = [
+        ("nmap", {
+            "target": subnet,
+            "extra_args": sweep_flags,
+            "timeout": sweep_timeout,
+        })
+        for subnet in targets
+    ]
+    _run_kickoff_steps(sweep_steps, registry)
+
+    discovered_hosts = [
+        rec.get("host", "")
+        for rec in STATE.network_hosts
+        if rec.get("host")
+        and str(rec.get("status", "")).lower() in {"up", "unknown"}
+    ]
+    discovered_hosts = list(dict.fromkeys(discovered_hosts))
+    if discovered_hosts:
+        STATE.notes.append(
+            f"Network inventory: {len(discovered_hosts)} host(s) discovered during sweep"
+        )
+        console.print(
+            f"  [bold green]Discovered hosts:[/] {', '.join(discovered_hosts[:12])}"
+        )
+
+    service_targets = discovered_hosts[:host_limit] if discovered_hosts else targets[:1]
+    service_steps = [
+        ("nmap", {
+            "target": host,
+            "extra_args": "-sV -sC -O --top-ports 100 -T4 -Pn",
+            "timeout": service_timeout,
+        })
+        for host in service_targets
+    ]
+    if service_steps:
+        _run_kickoff_steps(service_steps, registry)
+
+    task_steps = _operator_task_kickoff_steps(
+        "network",
+        seed_url=_state_origin_url(),
+        discovered_hosts=discovered_hosts,
+    )
+
+    pivot_steps: List[Tuple[str, Dict[str, Any]]] = []
+    if STATE.queued_urls:
+        pivot_steps.append((
+            "httpx",
+            {
+                "targets": "\n".join(STATE.queued_urls[:40]),
+                "timeout": 180 if profile == "quick" else 240,
+            },
+        ))
+
+    web_urls: List[str] = []
+    for rec in STATE.network_hosts[:host_limit]:
+        host = (rec.get("host") or "").strip()
+        ports = rec.get("ports", []) or []
+        open_ports = {
+            int(p.get("port"))
+            for p in ports
+            if isinstance(p, dict) and str(p.get("state", "")).lower() in {"open", "open|filtered"}
+            and str(p.get("port", "")).isdigit()
+        }
+        if host and any(port in {139, 445} for port in open_ports):
+            pivot_steps.append(("enum4linux", {"host": host, "timeout": 300}))
+        if host and 161 in open_ports:
+            pivot_steps.append(("snmpwalk", {"host": host, "timeout": 180}))
+
+        for web_url in rec.get("web_urls", [])[:3]:
+            if web_url not in web_urls:
+                web_urls.append(web_url)
+
+    for web_url in web_urls[: 2 if profile == "quick" else 4]:
+        pivot_steps.extend([
+            ("whatweb", {"url": web_url, "timeout": 180}),
+            ("wafw00f", {"url": web_url, "timeout": 180}),
+            ("nuclei", {"url": web_url, "timeout": service_timeout}),
+        ])
+        if profile != "quick":
+            pivot_steps.append(("gobuster", {"url": web_url, "timeout": 180}))
+        if profile == "deep":
+            pivot_steps.append(("nikto", {"url": web_url, "timeout": 240}))
+
+    if task_steps:
+        pivot_steps[0:0] = task_steps
+
+    if pivot_steps:
+        _run_kickoff_steps(pivot_steps, registry)
+
+    if STATE.queued_urls:
+        _run_kickoff_steps([
+            ("bulk_audit_next", {
+                "batch_size": min(BOOTSTRAP_BATCH, max(1, len(STATE.queued_urls))),
+            })
+        ], registry)
 
 
 def _run_kickoff_steps(steps: List[Tuple[str, Dict[str, Any]]],
@@ -4061,30 +6052,35 @@ def _run_kickoff_steps(steps: List[Tuple[str, Dict[str, Any]]],
 
 
 def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
-              fresh: bool = False) -> None:
+              fresh: bool = False, operator_task: str = "") -> None:
     global STATE
     agent_start = time.time()
 
     cp = str(CHECKPOINT_PATH)
     run_mode = getattr(run_agent, '_mode', 'web')
     scope_target = _normalize_scope_target(domain, run_mode)
+    task_text = (operator_task or getattr(run_agent, "_task", "") or "").strip()
 
     if not fresh and resume and os.path.exists(cp):
         loaded_state = AgentState.load(cp)
-        if loaded_state.domain == scope_target and loaded_state.mode == run_mode:
+        if (
+            loaded_state.domain == scope_target
+            and loaded_state.mode == run_mode
+            and (loaded_state.operator_task or "").strip() == task_text
+        ):
             STATE = loaded_state
             console.print(
                 f"[bold green]Resumed[/] session for [bold]{STATE.domain}[/]"
             )
         else:
             console.print(
-                "[bold yellow]Checkpoint does not match requested target or mode; "
+                "[bold yellow]Checkpoint does not match requested target, mode, or task focus; "
                 "starting a fresh session.[/]"
             )
-            STATE = bootstrap_state(domain, mode=run_mode)
+            STATE = bootstrap_state(domain, mode=run_mode, operator_task=task_text)
             console.print(f"[bold green]New session[/] for [bold]{STATE.domain}[/]")
     else:
-        STATE = bootstrap_state(domain, mode=run_mode)
+        STATE = bootstrap_state(domain, mode=run_mode, operator_task=task_text)
         console.print(f"[bold green]New session[/] for [bold]{STATE.domain}[/]")
 
     ui_banner(STATE.domain, profile=getattr(run_agent, '_profile', 'standard'))
@@ -4118,6 +6114,12 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
     registry.register("whatweb", tool_whatweb)
     registry.register("nikto", tool_nikto)
     registry.register("gobuster", tool_gobuster)
+    registry.register("ffuf", tool_ffuf)
+    registry.register("subfinder", tool_subfinder)
+    registry.register("httpx", tool_httpx)
+    registry.register("wafw00f", tool_wafw00f)
+    registry.register("enum4linux", tool_enum4linux)
+    registry.register("snmpwalk", tool_snmpwalk)
     registry.register("run", tool_run_command)
     registry.register("run_command", tool_run_command)
     registry.register("install", tool_install)
@@ -4137,6 +6139,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
     registry.register("write_json_report", tool_write_json_report)
     registry.register("write_markdown_report", tool_write_markdown_report)
     registry.register("write_markdown_summary", tool_write_markdown_summary)
+    registry.register("write_html_report", tool_write_html_report)
 
     # Deterministic kickoff
     if len(STATE.pages) == 0 and len(STATE.recent_events) == 0:
@@ -4182,6 +6185,16 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
                     action = "summarize"
                 else:
                     decision["tool"] = tool_name
+            elif _llm_decision_needs_fallback(decision):
+                fallback = _fallback_decision_from_state()
+                if fallback:
+                    decision = fallback
+                    action = "tool"
+                    decision["action"] = "tool"
+                    decision.setdefault(
+                        "why",
+                        "Fallback after malformed LLM response.",
+                    )
             why = str(
                 decision.get("why")
                 or decision.get("reason")
@@ -4200,9 +6213,24 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
                 sig = f"{tool_name}:{json.dumps(args, sort_keys=True)}"
 
                 if sig in STATE.recent_tool_signatures[-6:]:
-                    STATE.notes.append(f"Skipped repeat: {sig}")
+                    repeat_count = _bump_repeat_count(sig)
+                    block_note = (
+                        f"Blocked repeated action ({repeat_count}x): {sig}. "
+                        f"Pivot to a different host, port, subdomain, or tool."
+                    )
+                    STATE.notes.append(block_note)
+                    STATE.recent_events.append({
+                        "type": "blocked_action",
+                        "step": STATE.step,
+                        "tool": tool_name,
+                        "signature": sig,
+                        "repeat_count": repeat_count,
+                        "note": block_note,
+                    })
                     console.print(
                         f"  [dim]⤳ skipped (duplicate action)[/]")
+                    if repeat_count >= 2:
+                        summarize_memory()
                     continue
 
                 result = registry.call(tool_name, **args)
@@ -4264,6 +6292,12 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
                         "saved" if md_report.ok else md_report.error[:80])
                 if not md_report.ok:
                     console.print(f"  [red]write_markdown_summary failed: {md_report.error}[/]")
+                html_report = registry.call("write_html_report")
+                ui_tool("write_html_report", str(HTML_REPORT),
+                        html_report.ok, html_report.duration_s,
+                        "saved" if html_report.ok else html_report.error[:80])
+                if not html_report.ok:
+                    console.print(f"  [red]write_html_report failed: {html_report.error}[/]")
                 STATE.checkpoint(cp)
                 ui_done(time.time() - agent_start)
                 _close_browser()
@@ -4292,10 +6326,13 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
     summarize_memory()
     json_report = registry.call("write_json_report")
     md_report = registry.call("write_markdown_summary")
+    html_report = registry.call("write_html_report")
     if not json_report.ok:
         console.print(f"  [red]write_json_report failed: {json_report.error}[/]")
     if not md_report.ok:
         console.print(f"  [red]write_markdown_summary failed: {md_report.error}[/]")
+    if not html_report.ok:
+        console.print(f"  [red]write_html_report failed: {html_report.error}[/]")
     STATE.checkpoint(cp)
     ui_done(time.time() - agent_start)
     _close_browser()
@@ -4304,8 +6341,8 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
 # ═══════════════════════════════════════════════════════════
 #  INTERACTIVE STARTUP
 # ═══════════════════════════════════════════════════════════
-def interactive_startup() -> Tuple[str, str, str, bool]:
-    """Interactive menu. Returns (target, profile, mode, fresh)."""
+def interactive_startup() -> Tuple[str, str, str, bool, str]:
+    """Interactive menu. Returns (target, profile, mode, fresh, task)."""
     console.print(_ASCII_BANNER)
     console.print(Panel(
         "[bold]Autonomous Pentest Agent[/]\n"
@@ -4334,11 +6371,15 @@ def interactive_startup() -> Tuple[str, str, str, bool]:
         choices=["quick", "standard", "deep"],
         default="standard",
     )
+    task = Prompt.ask(
+        "[bold]Specific task focus[/] [dim](optional; separate multiple items with semicolons)[/]",
+        default="",
+    ).strip()
     fresh = not Confirm.ask(
         "[bold]Resume from checkpoint if available?[/]", default=True
     )
     console.print()
-    return target, profile, mode, fresh
+    return target, profile, mode, fresh, task
 
 
 # ═══════════════════════════════════════════════════════════
@@ -4350,7 +6391,11 @@ if __name__ == "__main__":
     _fresh = False
     _cli = False
     _mode = "web"
-    for arg in sys.argv[1:]:
+    _task = ""
+    _args = sys.argv[1:]
+    i = 0
+    while i < len(_args):
+        arg = _args[i]
         if arg == "--resume":
             _resume = True
             _cli = True
@@ -4360,19 +6405,28 @@ if __name__ == "__main__":
         elif arg == "--network":
             _mode = "network"
             _cli = True
+        elif arg == "--task" and i + 1 < len(_args):
+            _task = _args[i + 1]
+            _cli = True
+            i += 1
+        elif arg.startswith("--task="):
+            _task = arg.split("=", 1)[1]
+            _cli = True
         elif not arg.startswith("-"):
             _domain = arg
             _cli = True
+        i += 1
 
     if not _cli:
         # Interactive mode
-        _domain, _profile, _mode, _fresh = interactive_startup()
+        _domain, _profile, _mode, _fresh, _task = interactive_startup()
         p = SCAN_PROFILES.get(_profile, SCAN_PROFILES["standard"])
         MAX_STEPS = p["max_steps"]
         BOOTSTRAP_BATCH = p["batch"]
         run_agent._profile = _profile  # type: ignore
     run_agent._mode = _mode  # type: ignore
+    run_agent._task = _task  # type: ignore
     if _mode == "network":
-        run_agent(_domain, resume=not _fresh, fresh=_fresh)
+        run_agent(_domain, resume=not _fresh, fresh=_fresh, operator_task=_task)
     else:
-        run_agent(_domain, resume=not _fresh, fresh=_fresh)
+        run_agent(_domain, resume=not _fresh, fresh=_fresh, operator_task=_task)

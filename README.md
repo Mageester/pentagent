@@ -28,8 +28,10 @@ The agent operates as an intelligent decision loop: it runs reconnaissance, anal
 | **Browser Rendering** | Playwright-based screenshots and JS-rendered DOM extraction |
 | **Lighthouse Integration** | Performance, accessibility, SEO, and best practices scoring |
 | **Persistent State** | Checkpoint/resume support — interrupt and continue assessments |
+| **Attack-Graph Memory** | Tracks discovered surfaces, findings, confidence, and pivots across the run |
 | **Rich Terminal UI** | ASCII art banner, live progress, structured tool output, dashboards |
-| **Structured Reporting** | Machine-readable JSON + LLM-generated markdown summary |
+| **Structured Reporting** | Machine-readable JSON + markdown + HTML reports with detailed findings |
+| **Release Notes UI** | Polished browser-readable changelog page with release highlights and operator guidance |
 
 ---
 
@@ -112,6 +114,7 @@ python agent.py
 Presents an interactive menu:
 - Target domain input
 - Scan profile selection (quick / standard / deep)
+- Optional operator task focus for specific work you want prioritized
 - Resume/fresh session choice
 
 ### CLI Mode
@@ -120,7 +123,10 @@ Presents an interactive menu:
 python agent.py example.com              # target specific domain
 python agent.py example.com --fresh      # start fresh (ignore checkpoint)
 python agent.py --resume                 # resume previous session
+python agent.py example.com --task "find IDORs in profile endpoints; map admin panels"
 ```
+
+You can also enter a task focus interactively. Separate multiple tasks with semicolons.
 
 ### Scan Profiles
 
@@ -141,10 +147,13 @@ audit_output/
 ├── checkpoint.json          # Session state (resume support)
 ├── audit_report.json        # Machine-readable full report
 ├── audit_summary.md         # LLM-generated executive summary
+├── audit_summary.html       # Browser-friendly detailed report
 ├── screenshots/             # Playwright full-page captures
 ├── lighthouse/              # Lighthouse JSON reports
 └── scan_logs/               # Terminal command output logs
 ```
+
+The repository root also includes `RELEASE_NOTES.html`, a browser-friendly release/changelog page that summarizes the latest operator-focused changes.
 
 ---
 
