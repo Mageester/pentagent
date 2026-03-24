@@ -510,6 +510,7 @@
           <span class="pill"><span class="dot"></span> WSL-first tool routing</span>
           <span class="pill"><span class="dot"></span> HTML + Markdown reports</span>
           <span class="pill"><span class="dot"></span> Mission-focused operator mode</span>
+          <span class="pill"><span class="dot"></span> Free or balanced autonomy</span>
         </div>
       </article>
 
@@ -559,7 +560,7 @@
         <article class="card feature">
           <div class="tag">Operator control</div>
           <h3>Mission-focused runs</h3>
-          <p>Launch the agent with a broad objective and it will prioritize that mission first, then keep the run aligned with the most useful subgoals it discovers.</p>
+          <p>Launch the agent with a broad objective and choose how much guidance it gets: free autonomy for maximum model freedom or balanced autonomy for a little more kickoff structure.</p>
         </article>
         <article class="card feature">
           <div class="tag">Reliability</div>
@@ -686,7 +687,7 @@
 
   cd C:\Agent
   .\.venv\Scripts\Activate.ps1
-  python agent.py --model qwen3-coder:30b --mission "map the attack surface, validate high-value leads, and report only actionable vulns with repro steps and remediation"
+  python agent.py --model qwen3-coder:30b --autonomy free --mission "map the attack surface, validate high-value leads, and report only actionable vulns with repro steps and remediation"
 
 Suggested mission:
 

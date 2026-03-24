@@ -389,6 +389,8 @@ def ui_banner(domain: str, profile: str = "standard") -> None:
     ]
     if STATE is not None and getattr(STATE, "target_profile", "").strip():
         lines.append(f"[dim]Target Type:[/] [bold]{STATE.target_profile}[/]")
+    if STATE is not None and getattr(STATE, "autonomy_mode", "").strip():
+        lines.append(f"[dim]Autonomy:[/]   [bold]{STATE.autonomy_mode}[/]")
     if STATE is not None and getattr(STATE, "operator_task", "").strip():
         lines.append(f"[dim]Mission:[/]  [bold]{compact_text(STATE.operator_task, 140)}[/]")
     lines.extend([
@@ -474,8 +476,10 @@ def ui_dashboard(state: "AgentState") -> None:
     grid.add_column(justify="left", ratio=1)
     grid.add_column(justify="left", ratio=2)
     grid.add_column(justify="left", ratio=2)
+    grid.add_column(justify="left", ratio=2)
     goal = compact_text(state.goal, 88)
     task = compact_text(getattr(state, "operator_task", ""), 88)
+    autonomy = compact_text(getattr(state, "autonomy_mode", ""), 16)
     latest_finding = _latest_finding_text(state)
     latest_note = _latest_note_text(state)
     latest_tool = _latest_tool_text(state)
@@ -501,10 +505,12 @@ def ui_dashboard(state: "AgentState") -> None:
         grid.add_row(
             f"[bold green]Steps[/]  {state.step}/{MAX_STEPS}",
             f"[dim]Mode[/]  network",
+            f"[dim]Autonomy[/]  {autonomy or 'free'}",
             f"[dim]Mission[/]  {task or 'none'}",
         )
         grid.add_row(
             f"[dim]Profile[/]  {target_profile}",
+            f"[dim]Autonomy[/]  {autonomy or 'free'}",
             f"[dim]Graph[/]  {graph_summary['nodes']}n/{graph_summary['edges']}e",
             f"[dim]Last tool[/]  {latest_tool or 'none'}",
         )
@@ -526,6 +532,7 @@ def ui_dashboard(state: "AgentState") -> None:
         )
         grid.add_row(
             f"[dim]Profile[/]  {target_profile}",
+            f"[dim]Autonomy[/]  {autonomy or 'free'}",
             f"[dim]Mission[/]  {task or 'none'}",
             f"[dim]Graph[/]  {graph_summary['nodes']}n/{graph_summary['edges']}e",
         )
@@ -571,6 +578,7 @@ class AgentState:
     start_url: str
     goal: str
     operator_task: str = ""
+    autonomy_mode: str = "free"
     target_profile: str = ""
     mode: str = "web"
     step: int = 0
@@ -598,6 +606,7 @@ class AgentState:
             "start_url": self.start_url,
             "goal": self.goal,
             "operator_task": self.operator_task,
+            "autonomy_mode": self.autonomy_mode,
             "target_profile": self.target_profile,
             "step": self.step,
             "network_subnets": self.network_subnets,
@@ -626,6 +635,7 @@ class AgentState:
             start_url=data["start_url"],
             goal=data["goal"],
             operator_task=data.get("operator_task", ""),
+            autonomy_mode=data.get("autonomy_mode", "free"),
             target_profile=data.get("target_profile", ""),
             step=data.get("step", 0),
             network_subnets=data.get("network_subnets", []),
@@ -5105,8 +5115,9 @@ Rules:
 - ONLY target the authorized domain
 - Be thorough, aggressive, and systematic
 - Use run_command freely for any tool or command
-- If blocked_actions or memory_summary says an action was repeated, pivot immediately to
-  a different tool, host, URL, or parameter set.
+- If blocked_actions or memory_summary says an action was repeated, treat that as context;
+  you decide whether to pivot or continue based on new evidence, not because the runtime
+  is forcing a choice.
 - Prefer pivots that extend the current attack graph: validate surfaced findings, expand from authenticated or object-reference surfaces, and avoid low-signal retries.
 - If the operator assigned a specific task, translate it into the smallest relevant set
   of tools and execute that task first.
@@ -5336,10 +5347,12 @@ def _build_universal_pentest_directive(mode: str) -> str:
     profile = "unknown"
     graph = {"nodes": 0, "edges": 0, "validated_findings": 0}
     health: List[Dict[str, Any]] = []
+    autonomy_mode = "free"
     if state is not None:
         profile = getattr(state, "target_profile", "") or _target_profile_from_state()
         graph = _attack_graph_summary(state)
         health = _tool_health_summary(state, limit=4)
+        autonomy_mode = getattr(state, "autonomy_mode", "free") or "free"
     health_text = "; ".join(
         f"{item['tool']}({item['failure']}f/{item['timeouts']}t)"
         for item in health if item["failure"] or item["timeouts"]
@@ -5356,6 +5369,10 @@ def _build_universal_pentest_directive(mode: str) -> str:
         "Sequence policy: treat any phase list in the prompt as advisory; reorder, skip, or revisit phases whenever evidence makes that the better move.",
         "Reporting policy: summarize only durable strategic notes; do not spend turns on empty recap text or filler.",
     ]
+    if autonomy_mode == "free":
+        lines.append(
+            "Autonomy mode: free. The runtime will not stop you from reusing a tool when the evidence justifies it; decide your own tool path and installation plan."
+        )
     if health_text:
         lines.append(f"Tool friction: {health_text}. Prefer alternatives when a tool is unhealthy.")
     if mode == "web":
@@ -5576,7 +5593,7 @@ def summarize_memory() -> None:
 #  AGENT RUNNER
 # ═══════════════════════════════════════════════════════════
 def bootstrap_state(domain: str, mode: str = "web",
-                    operator_task: str = "") -> AgentState:
+                    operator_task: str = "", autonomy_mode: str = "free") -> AgentState:
     raw = domain.strip()
     domain = _normalize_scope_target(raw, mode)
     task_text = (operator_task or "").strip()
@@ -5589,6 +5606,7 @@ def bootstrap_state(domain: str, mode: str = "web",
             start_url="",
             goal=f"Full network penetration test of {domain}{task_suffix}",
             operator_task=task_text,
+            autonomy_mode=autonomy_mode,
             target_profile=_infer_target_profile(domain, mode, ""),
             queued_urls=[],
         )
@@ -5600,6 +5618,7 @@ def bootstrap_state(domain: str, mode: str = "web",
         start_url=start_url,
         goal=f"Full penetration test and security assessment of {domain}{task_suffix}",
         operator_task=task_text,
+        autonomy_mode=autonomy_mode,
         target_profile=_infer_target_profile(domain, mode, start_url),
         queued_urls=[start_url],
     )
@@ -5635,6 +5654,8 @@ def _detect_local_subnets() -> List[str]:
 def _operator_task_kickoff_steps(mode: str, seed_url: str = "",
                                  discovered_hosts: Optional[List[str]] = None) -> List[Tuple[str, Dict[str, Any]]]:
     assert STATE is not None
+    if getattr(STATE, "autonomy_mode", "free") == "free":
+        return []
     task_items = _operator_task_items()
     if not task_items:
         return []
@@ -5774,8 +5795,9 @@ Rules:
 - Be thorough — scan EVERY host you discover
 - Vary your approach per host based on services found
 - If the prompt already contains network_inventory or a host/service list, use it.
-- If blocked_actions or memory_summary says an action was repeated, pivot immediately
-  to a different host, service, or tool instead of retrying the same scan.
+- If blocked_actions or memory_summary says an action was repeated, treat that as context;
+  you decide whether to pivot or continue based on new evidence, not because the runtime
+  is forcing a choice.
 - Prefer pivots that advance the graph: move from discovery to validation, from host to service, and from service to evidence-backed follow-up.
 - If the operator assigned a specific task, translate it into the smallest relevant set
   of tools and execute that task first.
@@ -5846,7 +5868,7 @@ def deterministic_kickoff(registry: ToolRegistry) -> None:
         steps.append(("lighthouse_audit", {"url": STATE.start_url}))
 
     task_steps = _operator_task_kickoff_steps("web", seed_url=STATE.start_url)
-    if task_steps:
+    if task_steps and getattr(STATE, "autonomy_mode", "free") != "free":
         steps[7:7] = task_steps
 
     _run_kickoff_steps(steps, registry)
@@ -5931,6 +5953,8 @@ def network_kickoff(registry: ToolRegistry) -> None:
         seed_url=_state_origin_url(),
         discovered_hosts=discovered_hosts,
     )
+    if getattr(STATE, "autonomy_mode", "free") == "free":
+        task_steps = []
 
     pivot_steps: List[Tuple[str, Dict[str, Any]]] = []
     if STATE.queued_urls:
@@ -6049,7 +6073,8 @@ def _run_kickoff_steps(steps: List[Tuple[str, Dict[str, Any]]],
 
 
 def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
-              fresh: bool = False, operator_task: str = "") -> None:
+              fresh: bool = False, operator_task: str = "",
+              autonomy_mode: str = "free") -> None:
     global STATE
     agent_start = time.time()
 
@@ -6057,6 +6082,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
     run_mode = getattr(run_agent, '_mode', 'web')
     scope_target = _normalize_scope_target(domain, run_mode)
     task_text = (operator_task or getattr(run_agent, "_task", "") or "").strip()
+    autonomy_text = (autonomy_mode or getattr(run_agent, "_autonomy", "free") or "free").strip() or "free"
 
     if not fresh and resume and os.path.exists(cp):
         loaded_state = AgentState.load(cp)
@@ -6064,6 +6090,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
             loaded_state.domain == scope_target
             and loaded_state.mode == run_mode
             and (loaded_state.operator_task or "").strip() == task_text
+            and (getattr(loaded_state, "autonomy_mode", "free") or "free").strip() == autonomy_text
         ):
             STATE = loaded_state
             console.print(
@@ -6071,13 +6098,13 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
             )
         else:
             console.print(
-                "[bold yellow]Checkpoint does not match requested target, mode, or mission; "
+                "[bold yellow]Checkpoint does not match requested target, mode, mission, or autonomy; "
                 "starting a fresh session.[/]"
             )
-            STATE = bootstrap_state(domain, mode=run_mode, operator_task=task_text)
+            STATE = bootstrap_state(domain, mode=run_mode, operator_task=task_text, autonomy_mode=autonomy_text)
             console.print(f"[bold green]New session[/] for [bold]{STATE.domain}[/]")
     else:
-        STATE = bootstrap_state(domain, mode=run_mode, operator_task=task_text)
+        STATE = bootstrap_state(domain, mode=run_mode, operator_task=task_text, autonomy_mode=autonomy_text)
         console.print(f"[bold green]New session[/] for [bold]{STATE.domain}[/]")
 
     ui_banner(STATE.domain, profile=getattr(run_agent, '_profile', 'standard'))
@@ -6211,24 +6238,26 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
 
                 if sig in STATE.recent_tool_signatures[-6:]:
                     repeat_count = _bump_repeat_count(sig)
-                    block_note = (
-                        f"Blocked repeated action ({repeat_count}x): {sig}. "
-                        f"Pivot to a different host, port, subdomain, or tool."
-                    )
+                    block_note = f"Repeated action ({repeat_count}x): {sig}."
+                    autonomy_mode = getattr(STATE, "autonomy_mode", "free")
                     STATE.notes.append(block_note)
                     STATE.recent_events.append({
-                        "type": "blocked_action",
+                        "type": "repeat_observed" if autonomy_mode == "free" else "blocked_action",
                         "step": STATE.step,
                         "tool": tool_name,
                         "signature": sig,
                         "repeat_count": repeat_count,
                         "note": block_note,
                     })
-                    console.print(
-                        f"  [dim]⤳ skipped (duplicate action)[/]")
-                    if repeat_count >= 2:
-                        summarize_memory()
-                    continue
+                    if autonomy_mode == "free":
+                        console.print(
+                            f"  [dim]⤳ repeated action allowed in free autonomy mode[/]")
+                    else:
+                        console.print(
+                            f"  [dim]⤳ skipped (duplicate action)[/]")
+                        if repeat_count >= 2:
+                            summarize_memory()
+                        continue
 
                 result = registry.call(tool_name, **args)
                 # Only record signature for successful calls
@@ -6338,8 +6367,8 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
 # ═══════════════════════════════════════════════════════════
 #  INTERACTIVE STARTUP
 # ═══════════════════════════════════════════════════════════
-def interactive_startup() -> Tuple[str, str, str, bool, str, str]:
-    """Interactive menu. Returns (target, profile, mode, fresh, task, model)."""
+def interactive_startup() -> Tuple[str, str, str, bool, str, str, str]:
+    """Interactive menu. Returns (target, profile, mode, fresh, task, model, autonomy)."""
     console.print(_ASCII_BANNER)
     console.print(Panel(
         "[bold]Autonomous Pentest Agent[/]\n"
@@ -6376,11 +6405,16 @@ def interactive_startup() -> Tuple[str, str, str, bool, str, str]:
         "[bold]Operator mission[/] [dim](optional; broad authorized objective; separate multiple items with semicolons)[/]",
         default="",
     ).strip()
+    autonomy = Prompt.ask(
+        "[bold]Autonomy[/] [dim](free or balanced; free lets the agent choose its own path)[/]",
+        choices=["free", "balanced"],
+        default="free",
+    ).strip()
     fresh = not Confirm.ask(
         "[bold]Resume from checkpoint if available?[/]", default=True
     )
     console.print()
-    return target, profile, mode, fresh, task, model
+    return target, profile, mode, fresh, task, model, autonomy
 
 
 # ═══════════════════════════════════════════════════════════
@@ -6394,6 +6428,7 @@ if __name__ == "__main__":
     _mode = "web"
     _task = ""
     _model = DEFAULT_MODEL
+    _autonomy = "free"
     _args = sys.argv[1:]
     i = 0
     while i < len(_args):
@@ -6414,6 +6449,19 @@ if __name__ == "__main__":
         elif arg.startswith("--model="):
             _model = arg.split("=", 1)[1]
             _cli = True
+        elif arg == "--free":
+            _autonomy = "free"
+            _cli = True
+        elif arg == "--balanced":
+            _autonomy = "balanced"
+            _cli = True
+        elif arg == "--autonomy" and i + 1 < len(_args):
+            _autonomy = _args[i + 1]
+            _cli = True
+            i += 1
+        elif arg.startswith("--autonomy="):
+            _autonomy = arg.split("=", 1)[1]
+            _cli = True
         elif arg in {"--task", "--mission", "--objective"} and i + 1 < len(_args):
             _task = _args[i + 1]
             _cli = True
@@ -6428,13 +6476,14 @@ if __name__ == "__main__":
 
     if not _cli:
         # Interactive mode
-        _domain, _profile, _mode, _fresh, _task, _model = interactive_startup()
+        _domain, _profile, _mode, _fresh, _task, _model, _autonomy = interactive_startup()
         p = SCAN_PROFILES.get(_profile, SCAN_PROFILES["standard"])
         MAX_STEPS = p["max_steps"]
         BOOTSTRAP_BATCH = p["batch"]
         run_agent._profile = _profile  # type: ignore
     run_agent._mode = _mode  # type: ignore
     run_agent._task = _task  # type: ignore
+    run_agent._autonomy = _autonomy  # type: ignore
     MODEL = _model.strip() or DEFAULT_MODEL
     print(f"[bootstrap] Selected model: {MODEL}")
     _OL_OK, _OL_MSG = _bootstrap_ollama(MODEL)
@@ -6442,6 +6491,6 @@ if __name__ == "__main__":
         print(f"[FATAL] Ollama: {_OL_MSG}")
         sys.exit(1)
     if _mode == "network":
-        run_agent(_domain, resume=not _fresh, fresh=_fresh, operator_task=_task)
+        run_agent(_domain, resume=not _fresh, fresh=_fresh, operator_task=_task, autonomy_mode=_autonomy)
     else:
-        run_agent(_domain, resume=not _fresh, fresh=_fresh, operator_task=_task)
+        run_agent(_domain, resume=not _fresh, fresh=_fresh, operator_task=_task, autonomy_mode=_autonomy)

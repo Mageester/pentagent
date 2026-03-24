@@ -14,7 +14,8 @@ The agent operates as an intelligent decision loop: it runs reconnaissance, anal
 
 **This tool is intended exclusively for authorized penetration testing and security validation of systems you own or have explicit written permission to test.**
 
-At launch you choose the target, mode, scan profile, model, and an optional operator mission. The agent auto-pulls the selected Ollama model if it is missing, prefers Kali/Athena WSL tooling when available, and keeps going when optional tools fail so it can pivot instead of stalling.
+At launch you choose the target, mode, scan profile, model, autonomy style, and an optional operator mission. The agent auto-pulls the selected Ollama model if it is missing, prefers Kali/Athena WSL tooling when available, and keeps going when optional tools fail so it can pivot instead of stalling.
+You can also choose an autonomy style at launch. `free` lets the model drive the tool path with minimal orchestration; `balanced` keeps a little more kickoff structure.
 
 ---
 
@@ -34,6 +35,7 @@ At launch you choose the target, mode, scan profile, model, and an optional oper
 | **Operator Mission Setting** | Set a broad custom mission at launch and let the agent choose the best authorized pivots |
 | **Model Selection at Startup** | Pick the Ollama tag you want, and the agent auto-pulls it if it is missing |
 | **WSL Tool Routing** | Routes Linux recon and exploitation tools to the best available Kali/Athena WSL distro |
+| **Autonomy Selection** | Choose `free` for maximum model freedom or `balanced` for a bit more kickoff structure |
 | **Rich Terminal UI** | ASCII art banner, live progress, structured tool output, dashboards |
 | **Structured Reporting** | Machine-readable JSON + markdown + HTML reports with detailed findings |
 | **Release Notes UI** | Polished browser-readable changelog page with release highlights and operator guidance |
@@ -123,6 +125,7 @@ Presents an interactive menu:
 - Target or subnet input
 - Mode selection (web / network)
 - Model selection
+- Autonomy selection (`free` / `balanced`)
 - Scan profile selection (quick / standard / deep)
 - Optional operator mission for broad authorized work you want prioritized
 - Resume/fresh session choice
@@ -135,10 +138,12 @@ python agent.py example.com --fresh      # start fresh (ignore checkpoint)
 python agent.py --resume                 # resume previous session
 python agent.py example.com --mission "find IDORs in profile endpoints; map admin panels"
 python agent.py example.com --objective "map attack surface and validate auth/session flaws"
+python agent.py example.com --autonomy free
 ```
 
 You can also enter a mission interactively. Separate multiple mission items with semicolons.
 The startup parser accepts `--mission`, `--objective`, or the legacy `--task` alias.
+Use `--autonomy free` or `--autonomy balanced` to choose how much the code seeds the run before the model takes over.
 
 ### Runtime Notes
 
@@ -146,6 +151,7 @@ The startup parser accepts `--mission`, `--objective`, or the legacy `--task` al
 - Public DNS recon is used for public domains; localhost and lab-style targets skip that noise and go straight to direct enumeration.
 - Optional tool failures are logged and the run continues, so the agent can pivot instead of dying on a missing binary.
 - Lighthouse is optional and depends on a Chromium-capable browser being available on the host.
+- `free` autonomy mode removes the mission-specific kickoff steps and lets the model decide the path from live evidence.
 
 ### Scan Profiles
 
