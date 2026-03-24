@@ -320,7 +320,7 @@ http = requests.Session()
 http.headers.update({"User-Agent": "SiteAuditAgent/2.0 (+self-audit)"})
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-console = Console(legacy_windows=False)
+console = Console(legacy_windows=True)
 
 # ═══════════════════════════════════════════════════════════
 #  PLAYWRIGHT SINGLETON
