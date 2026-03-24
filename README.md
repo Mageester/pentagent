@@ -14,6 +14,8 @@ The agent operates as an intelligent decision loop: it runs reconnaissance, anal
 
 **This tool is intended exclusively for authorized penetration testing and security validation of systems you own or have explicit written permission to test.**
 
+At launch you choose the target, mode, scan profile, model, and an optional operator mission. The agent auto-pulls the selected Ollama model if it is missing, prefers Kali/Athena WSL tooling when available, and keeps going when optional tools fail so it can pivot instead of stalling.
+
 ---
 
 ## Key Capabilities
@@ -30,6 +32,8 @@ The agent operates as an intelligent decision loop: it runs reconnaissance, anal
 | **Persistent State** | Checkpoint/resume support — interrupt and continue assessments |
 | **Attack-Graph Memory** | Tracks discovered surfaces, findings, confidence, and pivots across the run |
 | **Operator Mission Setting** | Set a broad custom mission at launch and let the agent choose the best authorized pivots |
+| **Model Selection at Startup** | Pick the Ollama tag you want, and the agent auto-pulls it if it is missing |
+| **WSL Tool Routing** | Routes Linux recon and exploitation tools to the best available Kali/Athena WSL distro |
 | **Rich Terminal UI** | ASCII art banner, live progress, structured tool output, dashboards |
 | **Structured Reporting** | Machine-readable JSON + markdown + HTML reports with detailed findings |
 | **Release Notes UI** | Polished browser-readable changelog page with release highlights and operator guidance |
@@ -103,6 +107,7 @@ ollama pull qwen3-coder:30b
 ```
 
 Recommended default for strongest reasoning is `qwen3-coder:30b`, but you can choose any Ollama model tag at startup or with `--model`.
+The agent auto-pulls the selected model if it is missing.
 
 ---
 
@@ -115,7 +120,9 @@ python agent.py
 ```
 
 Presents an interactive menu:
-- Target domain input
+- Target or subnet input
+- Mode selection (web / network)
+- Model selection
 - Scan profile selection (quick / standard / deep)
 - Optional operator mission for broad authorized work you want prioritized
 - Resume/fresh session choice
@@ -132,6 +139,13 @@ python agent.py example.com --objective "map attack surface and validate auth/se
 
 You can also enter a mission interactively. Separate multiple mission items with semicolons.
 The startup parser accepts `--mission`, `--objective`, or the legacy `--task` alias.
+
+### Runtime Notes
+
+- `web` mode is for domains and URLs; `network` mode is for CIDRs or `auto`.
+- Public DNS recon is used for public domains; localhost and lab-style targets skip that noise and go straight to direct enumeration.
+- Optional tool failures are logged and the run continues, so the agent can pivot instead of dying on a missing binary.
+- Lighthouse is optional and depends on a Chromium-capable browser being available on the host.
 
 ### Scan Profiles
 
