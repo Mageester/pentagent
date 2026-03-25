@@ -6497,7 +6497,18 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
 # ═══════════════════════════════════════════════════════════
 #  INTERACTIVE STARTUP
 # ═══════════════════════════════════════════════════════════
-def interactive_startup() -> Tuple[str, str, str, bool, str, str, str, str, str, str]:
+def interactive_startup(
+    default_target: str = "",
+    default_mode: str = "web",
+    default_profile: str = "standard",
+    default_task: str = "",
+    default_model: str = DEFAULT_MODEL,
+    default_autonomy: str = "free",
+    default_provider: str = DEFAULT_PROVIDER,
+    default_api_base: str = DEFAULT_API_BASE,
+    default_api_key_env: str = DEFAULT_API_KEY_ENV,
+    default_fresh: bool = False,
+) -> Tuple[str, str, str, bool, str, str, str, str, str, str]:
     """Interactive menu. Returns (target, profile, mode, fresh, task, model, autonomy, provider, api_base, api_key_env)."""
     console.print(_ASCII_BANNER)
     console.print(Panel(
@@ -6509,7 +6520,7 @@ def interactive_startup() -> Tuple[str, str, str, bool, str, str, str, str, str,
     mode = Prompt.ask(
         "\n[bold]Mode[/]",
         choices=["web", "network"],
-        default="web",
+        default=default_mode,
     )
     if mode == "network":
         subnets = _detect_local_subnets()
@@ -6517,48 +6528,52 @@ def interactive_startup() -> Tuple[str, str, str, bool, str, str, str, str, str,
             console.print(f"  [dim]Detected subnets:[/] {', '.join(subnets)}")
         raw = Prompt.ask(
             "[bold]Target (subnet CIDR or 'auto')[/]",
-            default="auto",
+            default=(default_target.strip() or "auto"),
         )
     else:
-        raw = Prompt.ask("[bold]Target domain[/]", default=DEFAULT_DOMAIN)
+        target_default = default_target.strip()
+        raw = Prompt.ask("[bold]Target domain[/]", default=target_default)
+        while not raw.strip():
+            console.print("  [yellow]Target is required to start a pentest run.[/]")
+            raw = Prompt.ask("[bold]Target domain[/]", default=target_default)
     target = raw.strip()
     provider = Prompt.ask(
         "[bold]LLM provider[/]",
         choices=["ollama", "local", "api", "openai-compatible"],
-        default="ollama",
+        default=default_provider,
     ).strip().lower()
     provider = "ollama" if provider == "local" else provider
     model = Prompt.ask(
         "[bold]Model[/] [dim](recommended: qwen3-coder:30b; any Ollama tag works)[/]",
-        default=DEFAULT_MODEL,
+        default=default_model,
     ).strip()
     api_base = ""
-    api_key_env = DEFAULT_API_KEY_ENV
+    api_key_env = default_api_key_env
     if provider in {"api", "openai-compatible"}:
         api_base = Prompt.ask(
             "[bold]API base URL[/] [dim](OpenAI-compatible endpoint)[/]",
-            default=DEFAULT_API_BASE or "https://api.openai.com",
+            default=default_api_base or "https://api.openai.com",
         ).strip()
         api_key_env = Prompt.ask(
             "[bold]API key env var[/] [dim](name of the env var holding your key)[/]",
-            default=DEFAULT_API_KEY_ENV,
-        ).strip() or DEFAULT_API_KEY_ENV
+            default=default_api_key_env,
+        ).strip() or default_api_key_env
     profile = Prompt.ask(
         "[bold]Scan profile[/]",
         choices=["quick", "standard", "deep"],
-        default="standard",
+        default=default_profile,
     )
     task = Prompt.ask(
         "[bold]Operator mission[/] [dim](optional; broad authorized objective; separate multiple items with semicolons)[/]",
-        default="",
+        default=default_task,
     ).strip()
     autonomy = Prompt.ask(
         "[bold]Autonomy[/] [dim](free or balanced; free lets the agent choose its own path)[/]",
         choices=["free", "balanced"],
-        default="free",
+        default=default_autonomy,
     ).strip()
     fresh = not Confirm.ask(
-        "[bold]Resume from checkpoint if available?[/]", default=True
+        "[bold]Resume from checkpoint if available?[/]", default=not default_fresh
     )
     console.print()
     return target, profile, mode, fresh, task, model, autonomy, provider, api_base, api_key_env
@@ -6572,6 +6587,7 @@ if __name__ == "__main__":
     _resume = True
     _fresh = False
     _cli = False
+    _has_explicit_target = False
     _mode = "web"
     _task = ""
     _model = DEFAULT_MODEL
@@ -6649,11 +6665,23 @@ if __name__ == "__main__":
         elif not arg.startswith("-"):
             _domain = arg
             _cli = True
+            _has_explicit_target = True
         i += 1
 
-    if not _cli:
-        # Interactive mode
-        _domain, _profile, _mode, _fresh, _task, _model, _autonomy, _provider, _api_base, _api_key_env = interactive_startup()
+    if not _has_explicit_target:
+        # Interactive launcher when the user did not choose a target explicitly.
+        _domain, _profile, _mode, _fresh, _task, _model, _autonomy, _provider, _api_base, _api_key_env = interactive_startup(
+            default_target="",
+            default_mode=_mode,
+            default_profile="standard",
+            default_task=_task,
+            default_model=_model,
+            default_autonomy=_autonomy,
+            default_provider=_provider,
+            default_api_base=_api_base,
+            default_api_key_env=_api_key_env,
+            default_fresh=_fresh,
+        )
         p = SCAN_PROFILES.get(_profile, SCAN_PROFILES["standard"])
         MAX_STEPS = p["max_steps"]
         BOOTSTRAP_BATCH = p["batch"]

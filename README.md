@@ -16,6 +16,7 @@ The agent operates as an intelligent decision loop: it runs reconnaissance, anal
 
 At launch you choose the target, mode, scan profile, model, model provider, autonomy style, and an optional operator mission. The agent auto-pulls the selected Ollama model if it is missing, prefers Kali/Athena WSL tooling when available, and keeps going when optional tools fail so it can pivot instead of stalling.
 You can also choose an autonomy style at launch. `free` lets the model drive the tool path with minimal orchestration; `balanced` keeps a little more kickoff structure. The underlying skill registry is now explicit, so the agent can reason about its capabilities like a platform rather than a script.
+If you launch with only model/provider flags and no explicit target, the agent now opens the interactive launcher instead of silently starting a scan. A target must be chosen before a pentest run begins.
 
 ---
 
@@ -135,6 +136,8 @@ Presents an interactive menu:
 - Scan profile selection (quick / standard / deep)
 - Optional operator mission for broad authorized work you want prioritized
 - Resume/fresh session choice
+
+Bare launches without a target now behave like a platform launcher: they stop at the interactive prompt until you choose a target and mission.
 
 ### CLI Mode
 
