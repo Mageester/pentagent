@@ -58,5 +58,5 @@ Users are solely responsible for ensuring they have proper authorization before 
 
 1. **Local-only LLM**: No data is sent to cloud APIs. All inference runs locally via Ollama.
 2. **Explicit client initialization**: The Ollama client connects to `127.0.0.1:11434` explicitly to avoid DNS resolution issues.
-3. **Command logging**: All terminal commands are logged to `audit_output/scan_logs/` for audit trail purposes.
-4. **Checkpoint persistence**: Session state is saved locally and never transmitted.
+3. **Command logging**: All terminal commands are logged to `workspace/agents/main/artifacts/scan_logs/` for audit trail purposes.
+4. **Checkpoint persistence**: Session state is saved locally under `workspace/agents/main/state/` and never transmitted.

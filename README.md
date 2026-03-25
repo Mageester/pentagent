@@ -1,93 +1,97 @@
-# PENTAGENT
+# PentAgent
 
-**Autonomous penetration testing and security validation framework for authorized environments.**
+**Local-first penetration testing platform for authorized environments.**
 
-> Local LLM-driven security assessment agent that performs comprehensive reconnaissance, vulnerability scanning, and reporting — fully automated, fully offline.
-
----
+PentAgent now behaves more like a control plane than a single scanner:
+a browser dashboard, a persistent workspace, loadable skill packs, and a
+pentest engine that runs as one capability inside the platform.
 
 ## Overview
 
-PentAgent is a self-bootstrapping, autonomous penetration testing framework designed for authorized security assessments. It now uses a provider-agnostic model layer so you can run fully local models through Ollama today and switch to OpenAI-compatible API backends later when you want to offload compute without rewriting the agent.
+PentAgent is a self-bootstrapping, local-first security platform for
+authorized assessments. It keeps model selection, skills, workspace state,
+and reports on your machine, while still letting the pentest engine use
+Ollama locally or an OpenAI-compatible API backend when you want to offload
+compute.
 
-The agent operates as an intelligent decision loop: it runs reconnaissance, analyzes results, decides what to test next, executes security tools, and produces structured reports — all without human intervention after target specification.
+The platform is organized around a persistent workspace and browser
+dashboard. The dashboard reads the current checkpoint, skills, runtime
+config, and session manifests from the workspace, while the CLI launches the
+pentest engine as one skill pack inside that larger shell.
 
-**This tool is intended exclusively for authorized penetration testing and security validation of systems you own or have explicit written permission to test.**
+**This tool is intended exclusively for authorized penetration testing and
+security validation of systems you own or have explicit written permission
+to test.**
 
-At launch you choose the target, mode, scan profile, model, model provider, autonomy style, and an optional operator mission. The agent auto-pulls the selected Ollama model if it is missing, prefers Kali/Athena WSL tooling when available, and keeps going when optional tools fail so it can pivot instead of stalling.
-You can also choose an autonomy style at launch. `free` lets the model drive the tool path with minimal orchestration; `balanced` keeps a little more kickoff structure. The underlying skill registry is now explicit, so the agent can reason about its capabilities like a platform rather than a script.
-If you launch with only model/provider flags and no explicit target, the agent now opens the interactive launcher instead of silently starting a scan. A target must be chosen before a pentest run begins.
+At launch you choose the target, mode, scan profile, model, model provider,
+autonomy style, and an optional operator mission. The agent auto-pulls the
+selected Ollama model if it is missing, prefers Kali/Athena WSL tooling when
+available, and keeps going when optional tools fail so it can pivot instead
+of stalling.
 
----
+You can also choose an autonomy style at launch. `free` lets the model drive
+the tool path with minimal orchestration; `balanced` keeps a little more
+kickoff structure.
+
+If you launch with only model/provider flags and no explicit target, the
+agent opens the dashboard plus launcher flow instead of silently starting a
+scan. A target must be chosen before a pentest run begins.
+
+## Architecture
+
+```mermaid
+flowchart TD
+  A["Launcher / Onboarding"] --> B["Gateway / Runtime"]
+  B --> C["Workspace"]
+  C --> D["Skill Packs"]
+  B --> E["Pentest Engine Skill Pack"]
+  E --> F["Reports / Evidence"]
+  B --> G["Browser Dashboard"]
+```
+
+### Platform Layers
+
+- `Launcher / Onboarding` configures target, provider, model, autonomy, and mission.
+- `Gateway / Runtime` owns the workspace, dashboard, skill catalog, and runtime defaults.
+- `Workspace` stores docs, sessions, runtime config, and artifacts locally.
+- `Skill Packs` are discovered from `SKILL.md` files and merged with built-in tools.
+- `Pentest Engine Skill Pack` is the existing autonomous assessment engine.
+- `Browser Dashboard` provides the OpenClaw-style control surface.
 
 ## Key Capabilities
 
 | Capability | Description |
 |---|---|
-| **LLM-Driven Orchestration** | Your chosen Ollama model decides what to scan, what tools to run, and when the assessment is complete |
-| **Full Terminal Access** | The agent can execute any shell command — nmap, sqlmap, nuclei, or custom scripts |
-| **Self-Bootstrapping** | Auto-installs Python dependencies, Playwright, and can install security tools via winget/pip |
-| **8 Built-In Security Checks** | SSL/TLS, cookies, sensitive paths, CORS, mixed content, email security, info disclosure, security headers (with A–F grading) |
-| **Web Crawling & Analysis** | Full site mapping, metadata extraction, broken link detection, redirect chain analysis |
-| **Browser Rendering** | Playwright-based screenshots and JS-rendered DOM extraction |
-| **Lighthouse Integration** | Performance, accessibility, SEO, and best practices scoring |
-| **Persistent State** | Checkpoint/resume support — interrupt and continue assessments |
-| **Attack-Graph Memory** | Tracks discovered surfaces, findings, confidence, and pivots across the run |
-| **Operator Mission Setting** | Set a broad custom mission at launch and let the agent choose the best authorized pivots |
-| **Model Selection at Startup** | Pick the Ollama tag you want, and the agent auto-pulls it if it is missing |
-| **Provider Selection at Startup** | Run a local Ollama backend or an OpenAI-compatible API backend when you want to offload compute |
-| **Skill Registry** | Built-in skills are cataloged by category so the agent can reason about tools more like a platform |
-| **WSL Tool Routing** | Routes Linux recon and exploitation tools to the best available Kali/Athena WSL distro |
-| **Autonomy Selection** | Choose `free` for maximum model freedom or `balanced` for a bit more kickoff structure |
-| **Rich Terminal UI** | ASCII art banner, live progress, structured tool output, dashboards |
-| **Structured Reporting** | Machine-readable JSON + markdown + HTML reports with detailed findings |
-| **Release Notes UI** | Polished browser-readable changelog page with release highlights and operator guidance |
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│              Interactive Startup                 │
-│    Target domain · Scan profile · Authorization  │
-├─────────────────────────────────────────────────┤
-│           Self-Bootstrap Engine                  │
-│   Packages · Playwright · Tools · Ollama/Model   │
-├─────────────────────────────────────────────────┤
-│         Deterministic Kickoff Phase              │
-│  Recon: crawl, robots, sitemap, batch fetch      │
-│  Security: SSL, headers, cookies, paths, CORS,   │
-│           email, info disclosure                 │
-├─────────────────────────────────────────────────┤
-│         LLM-Driven Assessment Loop               │
-│  ┌───────────┐    ┌──────────────┐               │
-│  │  Qwen3    │───>│  Tool        │               │
-│  │  Decision │    │  Execution   │               │
-│  │  Engine   │<───│  + Terminal  │               │
-│  └───────────┘    └──────────────┘               │
-│         │                                        │
-│  ┌──────┴───────┐                                │
-│  │   Memory     │  Periodic summarization        │
-│  │   Manager    │  for context management         │
-│  └──────────────┘                                │
-├─────────────────────────────────────────────────┤
-│              Report Generation                   │
-│         JSON · Markdown · Screenshots            │
-│         Lighthouse · Scan Logs                   │
-└─────────────────────────────────────────────────┘
-```
-
----
+| LLM-Driven Orchestration | Your chosen model decides what to scan, what tools to run, and when the assessment is complete |
+| Browser Control Plane | Local dashboard shows workspace state, skills, sessions, and runtime defaults |
+| Persistent Workspace | Config, sessions, and docs live under `workspace/agents/<agent_id>/` |
+| Loadable Skill Packs | Bundled `SKILL.md` packs are discovered from disk and merged with built-in tools |
+| Full Terminal Access | The agent can execute shell commands, WSL tools, and custom scripts |
+| Self-Bootstrapping | Auto-installs Python dependencies, Playwright, and can install security tools via winget or pip |
+| 8 Built-In Security Checks | SSL/TLS, cookies, sensitive paths, CORS, mixed content, email security, info disclosure, security headers |
+| Web Crawling & Analysis | Full site mapping, metadata extraction, broken link detection, redirect chain analysis |
+| Browser Rendering | Playwright-based screenshots and JS-rendered DOM extraction |
+| Lighthouse Integration | Performance, accessibility, SEO, and best-practices scoring |
+| Persistent State | Checkpoint/resume support for interrupted assessments |
+| Attack-Graph Memory | Tracks discovered surfaces, findings, confidence, and pivots across the run |
+| Operator Mission Setting | Set a broad custom mission and let the agent choose the best authorized pivots |
+| Model Selection at Startup | Pick the Ollama tag you want, and the agent auto-pulls it if it is missing |
+| Provider Selection at Startup | Run a local Ollama backend or an OpenAI-compatible API backend |
+| Skill Registry | Built-in tools and file-backed skill packs are cataloged by category |
+| WSL Tool Routing | Routes Linux recon and exploitation tools to the best available Kali/Athena WSL distro |
+| Autonomy Selection | Choose `free` for maximum model freedom or `balanced` for a bit more kickoff structure |
+| Rich Terminal UI | ASCII art banner, live progress, structured tool output, dashboards |
+| Structured Reporting | Machine-readable JSON + markdown + HTML reports with detailed findings |
+| Release Notes UI | Browser-readable changelog page with release highlights and operator guidance |
 
 ## Installation
 
 ### Prerequisites
 
-- **Python 3.9+**
-- **Ollama** — [Download](https://ollama.com/download)
-- **Node.js** (optional) — enables Lighthouse auditing
-- **nmap** (optional) — enables port/service scanning
+- Python 3.9+
+- Ollama for local models
+- Node.js, optional, for Lighthouse
+- nmap, optional, for native host/service scanning
 
 ### Quick Start
 
@@ -99,194 +103,146 @@ python -m venv .venv
 python agent.py
 ```
 
-The script auto-installs all Python dependencies on first run. No manual `pip install` required.
+The script auto-installs all Python dependencies on first run.
 
 ### Model Setup
 
 ```powershell
-# Ensure Ollama is running
 ollama serve
-
-# The agent can auto-pull the selected model if missing, or manually:
 ollama pull qwen3-coder:30b
 ```
 
-Recommended default for strongest reasoning is `qwen3-coder:30b`, but you can choose any Ollama model tag at startup or with `--model`.
+Recommended default for strongest reasoning is `qwen3-coder:30b`, but you
+can choose any Ollama model tag at startup or with `--model`.
+
 The agent auto-pulls the selected model if it is missing.
-This only applies when you choose the local `ollama`/`local` provider; API-backed runs do not require Ollama on the host.
+This only applies when you choose the local `ollama`/`local` provider;
+API-backed runs do not require Ollama on the host.
 
-If you want to offload reasoning to an API-backed model later, choose the API-compatible provider at startup or launch with `--provider api` and point it at an OpenAI-compatible endpoint.
-
----
+If you want to offload reasoning later, choose the API-compatible provider
+at startup or launch with `--provider api` and point it at an
+OpenAI-compatible endpoint.
 
 ## Usage
 
-### Interactive Mode (Recommended)
+### Interactive Mode
 
 ```powershell
 python agent.py
 ```
 
-Presents an interactive menu:
+Interactive launch presents:
 - Target or subnet input
-- Mode selection (web / network)
+- Mode selection (`web` / `network`)
 - Model selection
 - Provider selection (`ollama` / `api`)
 - Autonomy selection (`free` / `balanced`)
-- Scan profile selection (quick / standard / deep)
-- Optional operator mission for broad authorized work you want prioritized
-- Resume/fresh session choice
+- Operator mission
+- Resume or fresh session choice
 
-Bare launches without a target now behave like a platform launcher: they stop at the interactive prompt until you choose a target and mission.
+The dashboard starts automatically and stays in sync with the workspace.
 
 ### CLI Mode
 
 ```powershell
-python agent.py example.com              # target specific domain
-python agent.py example.com --fresh      # start fresh (ignore checkpoint)
-python agent.py --resume                 # resume previous session
-python agent.py example.com --mission "find IDORs in profile endpoints; map admin panels"
-python agent.py example.com --objective "map attack surface and validate auth/session flaws"
-python agent.py example.com --autonomy free
-python agent.py example.com --provider api --api-base https://your-openai-compatible-endpoint.example/v1
+python agent.py http://localhost:3000 --mission "find auth bypass and IDOR"
+python agent.py 10.0.0.0/24 --network --autonomy balanced
+python agent.py --model qwen3-coder:30b --provider ollama
+python agent.py dashboard
+python agent.py doctor
+python agent.py skills
+python agent.py onboard
 ```
 
-You can also enter a mission interactively. Separate multiple mission items with semicolons.
-The startup parser accepts `--mission`, `--objective`, or the legacy `--task` alias.
-Use `--autonomy free` or `--autonomy balanced` to choose how much the code seeds the run before the model takes over.
+Useful flags:
+- `--mission`, `--objective`, or legacy `--task`
+- `--autonomy free` or `--autonomy balanced`
+- `--dashboard` / `--no-dashboard`
+- `--provider ollama` or `--provider api`
+- `--api-base` and `--api-key-env` for OpenAI-compatible backends
 
-### Runtime Notes
+## Runtime Notes
 
 - `web` mode is for domains and URLs; `network` mode is for CIDRs or `auto`.
-- Public DNS recon is used for public domains; localhost and lab-style targets skip that noise and go straight to direct enumeration.
-- Optional tool failures are logged and the run continues, so the agent can pivot instead of dying on a missing binary.
-- Lighthouse is optional and depends on a Chromium-capable browser being available on the host.
-- `free` autonomy mode removes the mission-specific kickoff steps and lets the model decide the path from live evidence.
+- Public DNS recon is used for public domains; localhost and lab-style
+  targets skip that noise and go straight to direct enumeration.
+- Optional tool failures are logged and the run continues, so the agent can
+  pivot instead of dying on a missing binary.
+- Lighthouse is optional and depends on a Chromium-capable browser being
+  available on the host.
+- `free` autonomy mode removes the mission-specific kickoff steps and lets
+  the model decide the path from live evidence.
 
-### Scan Profiles
+## Workspace Layout
 
-| Profile | Max Steps | Description |
-|---|---|---|
-| `quick` | 20 | Fast reconnaissance and basic security checks |
-| `standard` | 50 | Comprehensive assessment with vulnerability testing |
-| `deep` | 100 | Exhaustive testing with extended tool usage |
+The default workspace lives under `workspace/agents/main/`:
 
----
-
-## Output Artifacts
-
-All output is written to `audit_output/`:
-
+```text
+workspace/
+└── agents/
+    └── main/
+        ├── state/
+        │   └── checkpoint.json
+        ├── sessions/
+        ├── artifacts/
+        │   ├── audit_report.json
+        │   ├── audit_summary.md
+        │   ├── audit_summary.html
+        │   ├── screenshots/
+        │   ├── lighthouse/
+        │   └── scan_logs/
+        ├── skills/
+        └── docs/
+            ├── AGENTS.md
+            ├── BOOTSTRAP.md
+            ├── SOUL.md
+            └── TOOLS.md
 ```
-audit_output/
-├── checkpoint.json          # Session state (resume support)
-├── audit_report.json        # Machine-readable full report
-├── audit_summary.md         # LLM-generated executive summary
-├── audit_summary.html       # Browser-friendly detailed report
-├── screenshots/             # Playwright full-page captures
-├── lighthouse/              # Lighthouse JSON reports
-└── scan_logs/               # Terminal command output logs
-```
 
-The repository root also includes `RELEASE_NOTES.html`, a browser-friendly release/changelog page that summarizes the latest operator-focused changes.
-
----
+The browser dashboard reads this workspace directly.
 
 ## Built-In Security Checks
 
 | Check | What It Tests |
 |---|---|
 | SSL/TLS Analysis | Certificate validity, expiration, protocol version, cipher strength |
-| Security Headers | HSTS, CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy (A–F grade) |
+| Security Headers | HSTS, CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy |
 | Cookie Security | Secure, HttpOnly, SameSite attributes |
-| Sensitive Path Exposure | .env, .git, .htpasswd, phpinfo.php, admin panels, backups |
+| Sensitive Path Exposure | `.env`, `.git`, `.htpasswd`, `phpinfo.php`, admin panels, backups |
 | CORS Misconfiguration | Wildcard, reflected origin, null origin, credentials with wildcard |
 | Email Security | SPF and DMARC DNS record validation |
 | Information Disclosure | Server version headers, X-Powered-By, error page leakage |
 | Mixed Content | HTTP resources loaded on HTTPS pages |
 
----
-
 ## Security & Authorization
 
-> **⚠️ IMPORTANT: This tool is designed exclusively for authorized security testing.**
+> **Important: This tool is designed exclusively for authorized security testing.**
 
 By using this software, you acknowledge and agree that:
 
-1. You have **explicit written authorization** to test the target system
-2. You will **only target systems you own** or have permission to assess
-3. You understand that unauthorized access to computer systems is **illegal** in most jurisdictions
-4. The authors and contributors are **not responsible** for misuse of this tool
-5. You will comply with all applicable **local, state, national, and international laws**
-
-This tool is intended for:
-- Professional penetration testers with client authorization
-- Security teams assessing their own infrastructure
-- Red team / blue team exercises within authorized scope
-- Compliance and security validation testing
-
----
-
-## Use Cases
-
-- **Internal Security Audits** — Validate your organization's web application security posture
-- **Pre-Deployment Validation** — Test staging environments before production release
-- **Compliance Checks** — Verify security headers, SSL configuration, and email security
-- **Red Team Assessments** — Automated reconnaissance and vulnerability discovery phase
-- **Developer Security Testing** — Catch security issues during development
-
----
-
-## Not For
-
-This tool is **not** intended for:
-
-- ❌ Unauthorized access to systems you do not own
-- ❌ Scanning targets without explicit written permission
-- ❌ Bug bounty programs that prohibit automated scanning
-- ❌ Denial of service testing without authorization
-- ❌ Any activity that violates applicable law
-
----
-
-## Roadmap
-
-| Version | Milestone |
-|---|---|
-| `v0.1.0` | Core agent with built-in security checks and terminal access |
-| `v0.2.0` | Enhanced reporting with CVSS scoring and remediation guidance |
-| `v0.3.0` | Multi-target campaign support and scheduling |
-| `v0.4.0` | Plugin architecture for custom security checks |
-| `v0.5.0` | API endpoint testing (REST, GraphQL) |
-| `v1.0.0` | Stable release with full documentation and test coverage |
-
----
-
-## Tech Stack
-
-- **Python 3.9+** — Core runtime
-- **Ollama + chosen local model** — Local LLM inference (no cloud APIs)
-- **Playwright** — Browser automation and rendering
-- **BeautifulSoup + lxml** — HTML parsing
-- **Rich** — Terminal UI
-- **Lighthouse** — Performance and accessibility auditing (optional)
-
----
+1. You have explicit written authorization to test the target system
+2. You will only target systems you own or have permission to assess
+3. You understand that unauthorized access to computer systems is illegal in most jurisdictions
+4. The authors and contributors are not responsible for misuse of this tool
+5. You will comply with all applicable laws
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+- Keep contributions focused on authorized security testing
+- Prefer workspace-backed skill packs for new capabilities
+- Keep browser/dashboard changes local-first
+- Avoid hardcoding new state under the repository root
 
-## Security
+## Output Artifacts
 
-See [SECURITY.md](SECURITY.md) for our security policy and responsible disclosure process.
+Reports are written to the workspace artifacts directory and include:
+- JSON report
+- Markdown summary
+- HTML report
+- Screenshots
+- Lighthouse JSON
+- Scan logs
 
 ## License
 
-[MIT License](LICENSE) — See LICENSE file for details.
-
----
-
-<p align="center">
-  <sub>Built for authorized security professionals. Use responsibly.</sub>
-</p>
+See [LICENSE](LICENSE).

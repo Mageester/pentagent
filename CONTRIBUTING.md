@@ -54,6 +54,9 @@ pip install -r requirements.txt  # or let agent.py self-bootstrap
 - **Tools are pure functions** that return `ToolResult` objects
 - **Security tools** go in `security_tools.py` and return `{ok, findings, data}` dicts
 - **Agent tools** in `agent.py` wrap security tools and record findings to state
+- **Workspace and gateway state** belong in `workspace.py` and `gateway.py`
+- **Browser dashboard logic** belongs in `dashboard.py`
+- **File-backed capability packs** live under `skills/` and `workspace/agents/<agent_id>/skills/`
 - **The LLM orchestration layer** should not contain business logic
 - **All subprocess calls** must be Windows-safe (no bash-isms)
 

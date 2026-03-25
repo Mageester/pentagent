@@ -21,6 +21,7 @@ ENV/
 
 # Agent output (generated at runtime)
 audit_output/
+workspace/
 
 # OS
 .DS_Store

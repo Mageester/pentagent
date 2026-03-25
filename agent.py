@@ -271,6 +271,8 @@ from security_tools import (  # type: ignore
     check_info_disclosure, check_security_headers_deep,
 )
 from llm_backends import build_backend, describe_backend  # type: ignore
+from workspace import PentWorkspace  # type: ignore
+from gateway import PentGateway  # type: ignore
 from skill_registry import (  # type: ignore
     build_skill_catalog,
     skill_category_counts,
@@ -289,16 +291,18 @@ MODEL = DEFAULT_MODEL
 MODEL_PROVIDER = DEFAULT_PROVIDER
 MODEL_API_BASE = DEFAULT_API_BASE
 MODEL_API_KEY_ENV = DEFAULT_API_KEY_ENV
-DEFAULT_DOMAIN = "getaxiom.ca"
+DEFAULT_DOMAIN = ""
 
-OUTPUT_DIR = Path("audit_output")
-CHECKPOINT_PATH = OUTPUT_DIR / "checkpoint.json"
+WORKSPACE = PentWorkspace.from_env().ensure()
+OUTPUT_DIR = WORKSPACE.artifacts_dir
+CHECKPOINT_PATH = WORKSPACE.checkpoint_path()
 JSON_REPORT = OUTPUT_DIR / "audit_report.json"
 MD_REPORT = OUTPUT_DIR / "audit_summary.md"
 HTML_REPORT = OUTPUT_DIR / "audit_summary.html"
 SCREENSHOTS_DIR = OUTPUT_DIR / "screenshots"
 LIGHTHOUSE_DIR = OUTPUT_DIR / "lighthouse"
 SCAN_LOGS_DIR = OUTPUT_DIR / "scan_logs"
+GATEWAY: Optional[PentGateway] = None
 
 MAX_STEPS = 50
 REQUEST_TIMEOUT = 20
@@ -399,6 +403,7 @@ def ui_banner(domain: str, profile: str = "standard") -> None:
         f"[dim]Model:[/]    [bold]{MODEL}[/]",
         f"[dim]Provider:[/] [bold]{MODEL_PROVIDER}[/] [dim]({compact_text(backend_text, 52)})[/]",
         f"[dim]Profile:[/]  [bold]{profile}[/]",
+        f"[dim]Workspace:[/] [bold]{WORKSPACE.agent_id}[/] [dim]({compact_text(str(WORKSPACE.root), 52)})[/]",
     ]
     if STATE is not None and getattr(STATE, "target_profile", "").strip():
         lines.append(f"[dim]Target Type:[/] [bold]{STATE.target_profile}[/]")
@@ -411,6 +416,7 @@ def ui_banner(domain: str, profile: str = "standard") -> None:
         f"  [green]✔[/] Ollama   {pw_icon} Playwright   {lh_icon} Lighthouse",
         f"  [dim]External tools:[/] {avail_str}",
         f"  [dim]Skills:[/] {len(SKILL_CATALOG)} built-in skills across {len(SKILL_COUNTS)} categories",
+        f"  [dim]Dashboard:[/] {GATEWAY.dashboard_url if GATEWAY else f'http://127.0.0.1:{WORKSPACE.dashboard_port}/'}",
     ])
     if not LIGHTHOUSE_AVAILABLE:
         lines.append(f"  [dim]{_LH_MSG}[/]")
@@ -506,6 +512,8 @@ def ui_dashboard(state: "AgentState") -> None:
         for item in tool_health
     ) or "clean"
     provider_text = compact_text(describe_backend(llm), 56)
+    workspace_text = compact_text(str(WORKSPACE.root), 56)
+    dashboard_text = GATEWAY.dashboard_url if GATEWAY else f"http://127.0.0.1:{WORKSPACE.dashboard_port}/"
     if state.mode == "network":
         grid.add_row(
             f"[bold cyan]Subnets[/]  {len(getattr(state, 'network_subnets', []))}",
@@ -536,6 +544,12 @@ def ui_dashboard(state: "AgentState") -> None:
             f"[dim]Tool health[/]  {compact_text(tool_health_text, 88)}",
         )
         grid.add_row(
+            f"[dim]Workspace[/]  {workspace_text}",
+            f"[dim]Dashboard[/]  {dashboard_text}",
+            "",
+            "",
+        )
+        grid.add_row(
             f"[dim]Latest note[/]  {latest_note or 'none'}",
             f"[dim]Latest finding[/]  {latest_finding or 'none'}",
             "",
@@ -563,6 +577,12 @@ def ui_dashboard(state: "AgentState") -> None:
             f"[dim]Skills[/]  {len(SKILL_CATALOG)}",
             f"[dim]Categories[/]  {len(SKILL_COUNTS)}",
             f"[dim]Tool health[/]  {compact_text(tool_health_text, 88)}",
+        )
+        grid.add_row(
+            f"[dim]Workspace[/]  {workspace_text}",
+            f"[dim]Dashboard[/]  {dashboard_text}",
+            "",
+            "",
         )
         grid.add_row(
             f"[dim]Last tool[/]  {latest_tool or 'none'}",
@@ -695,6 +715,15 @@ class AgentState:
     def load(cls, path: str) -> "AgentState":
         with open(path, "r", encoding="utf-8") as f:
             return cls.from_dict(json.load(f))
+
+
+def _persist_workspace_session() -> None:
+    if STATE is None:
+        return
+    try:
+        WORKSPACE.write_session_manifest(STATE.to_dict())
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════
@@ -5014,7 +5043,7 @@ TOOL_DESCRIPTIONS = {
     "write_html_report": "Write HTML report. no args",
 }
 
-SKILL_CATALOG = build_skill_catalog(TOOL_DESCRIPTIONS)
+SKILL_CATALOG = build_skill_catalog(TOOL_DESCRIPTIONS, skill_dirs=WORKSPACE.skill_directories())
 SKILL_COUNTS = skill_category_counts(SKILL_CATALOG)
 
 
@@ -5134,7 +5163,7 @@ To start a scan via Burp REST API:
   }}'
 To check scan status:
   curl http://127.0.0.1:1337/v0.1/scan/{{task_id}}"""
-    return f"""You are an elite autonomous penetration testing agent with a skill registry and provider-agnostic model layer.
+    return f"""You are an elite autonomous penetration testing agent with a skill registry, workspace, and provider-agnostic model layer.
 You are AUTHORIZED to test ONLY this target domain: {{domain}}
 
 Objective: Perform a comprehensive security assessment.
@@ -5273,6 +5302,8 @@ def build_user_prompt(state: AgentState) -> str:
         "attack_graph": graph_summary,
         "tool_health": tool_health,
         "skill_registry": skills,
+        "workspace": WORKSPACE.workspace_status(),
+        "dashboard_url": GATEWAY.dashboard_url if GATEWAY else f"http://127.0.0.1:{WORKSPACE.dashboard_port}/",
     }, indent=2)
 
 
@@ -5832,7 +5863,7 @@ Examples:
 - wsl -d kali-linux nmap --script vuln <host>
 - wsl -d kali-linux masscan <subnet> -p1-65535 --rate=1000
 PREFER WSL tools — they are more powerful than native Windows."""
-    return f"""You are an elite autonomous NETWORK penetration testing agent with a skill registry and provider-agnostic model layer.
+    return f"""You are an elite autonomous NETWORK penetration testing agent with a skill registry, workspace, and provider-agnostic model layer.
 You are authorized to test the ENTIRE network: {{target}}
 
 Objective: Perform a comprehensive network security assessment.
@@ -6303,6 +6334,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
         else:
             deterministic_kickoff(registry)
         STATE.checkpoint(cp)
+        _persist_workspace_session()
 
     # LLM-driven loop
     ui_phase("LLM Phase")
@@ -6455,6 +6487,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
                 if not html_report.ok:
                     console.print(f"  [red]write_html_report failed: {html_report.error}[/]")
                 STATE.checkpoint(cp)
+                _persist_workspace_session()
                 ui_done(time.time() - agent_start)
                 _close_browser()
                 return
@@ -6467,12 +6500,14 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
                 summarize_memory()
 
             STATE.checkpoint(cp)
+            _persist_workspace_session()
 
     except KeyboardInterrupt:
         console.print(
             "\n[bold yellow]⚠ Interrupted — saving checkpoint…[/]")
         if STATE:
             STATE.checkpoint(cp)
+            _persist_workspace_session()
         _close_browser()
         return
 
@@ -6490,6 +6525,7 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
     if not html_report.ok:
         console.print(f"  [red]write_html_report failed: {html_report.error}[/]")
     STATE.checkpoint(cp)
+    _persist_workspace_session()
     ui_done(time.time() - agent_start)
     _close_browser()
 
@@ -6583,18 +6619,22 @@ def interactive_startup(
 #  MAIN
 # ═══════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    _domain = DEFAULT_DOMAIN
+    _runtime_defaults = WORKSPACE.load_runtime()
+    _domain = str(_runtime_defaults.get("target", DEFAULT_DOMAIN) or DEFAULT_DOMAIN)
     _resume = True
     _fresh = False
     _cli = False
     _has_explicit_target = False
     _mode = "web"
-    _task = ""
+    _profile = str(_runtime_defaults.get("profile", "standard") or "standard")
+    _task = str(_runtime_defaults.get("mission", "") or "")
     _model = DEFAULT_MODEL
-    _autonomy = "free"
-    _provider = DEFAULT_PROVIDER
-    _api_base = DEFAULT_API_BASE
-    _api_key_env = DEFAULT_API_KEY_ENV
+    _autonomy = str(_runtime_defaults.get("autonomy", "free") or "free")
+    _provider = str(_runtime_defaults.get("provider", DEFAULT_PROVIDER) or DEFAULT_PROVIDER)
+    _api_base = str(_runtime_defaults.get("api_base", DEFAULT_API_BASE) or DEFAULT_API_BASE)
+    _api_key_env = str(_runtime_defaults.get("api_key_env", DEFAULT_API_KEY_ENV) or DEFAULT_API_KEY_ENV)
+    _dashboard = True if _runtime_defaults.get("open_dashboard", True) else False
+    _command = ""
     _args = sys.argv[1:]
     i = 0
     while i < len(_args):
@@ -6641,6 +6681,15 @@ if __name__ == "__main__":
         elif arg in {"--api", "--openai-compatible"}:
             _provider = "openai-compatible"
             _cli = True
+        elif arg == "--dashboard":
+            _dashboard = True
+            _cli = True
+        elif arg == "--no-dashboard":
+            _dashboard = False
+            _cli = True
+        elif arg in {"dashboard", "onboard", "doctor", "skills"} and not _command:
+            _command = arg
+            _cli = True
         elif arg == "--api-base" and i + 1 < len(_args):
             _api_base = _args[i + 1]
             _cli = True
@@ -6668,12 +6717,75 @@ if __name__ == "__main__":
             _has_explicit_target = True
         i += 1
 
+    GATEWAY = PentGateway(
+        workspace=WORKSPACE,
+        skill_catalog=SKILL_CATALOG,
+        dashboard_port=WORKSPACE.dashboard_port,
+    )
+    WORKSPACE.save_runtime({
+        "provider": _provider,
+        "model": _model,
+        "autonomy": _autonomy,
+        "mission": _task,
+        "mode": _mode,
+        "target": _domain,
+        "profile": _profile,
+        "api_base": _api_base,
+        "api_key_env": _api_key_env,
+        "open_dashboard": _dashboard,
+    })
+    dashboard_url = GATEWAY.dashboard_url
+    if _command not in {"doctor", "skills"}:
+        dashboard_url = GATEWAY.start_dashboard(open_browser=_dashboard)
+    print(f"[platform] Dashboard endpoint: {dashboard_url}")
+
+    if _command in {"doctor", "skills"}:
+        if _command == "doctor":
+            console.print(Panel(
+                "\n".join([
+                    f"[bold]Workspace:[/] {WORKSPACE.root}",
+                    f"[bold]Agent:[/] {WORKSPACE.agent_id}",
+                    f"[bold]Dashboard:[/] {dashboard_url}",
+                    f"[bold]Model:[/] {_model}",
+                    f"[bold]Provider:[/] {_provider}",
+                    f"[bold]Autonomy:[/] {_autonomy}",
+                    f"[bold]Skill packs:[/] {len(SKILL_CATALOG)}",
+                ]),
+                title="[bold]PentAgent Doctor[/]",
+                border_style="bright_blue",
+                padding=(1, 2),
+            ))
+        else:
+            console.print(Panel(
+                "\n".join(skill_overview_lines(SKILL_CATALOG)),
+                title="[bold]PentAgent Skills[/]",
+                border_style="bright_blue",
+                padding=(1, 2),
+            ))
+        raise SystemExit(0)
+
+    if _command in {"dashboard", "onboard"} and not _has_explicit_target:
+        console.print(
+            Panel(
+                f"[bold]Browser dashboard[/] is running at [bold]{dashboard_url}[/]\n"
+                f"Use the workspace form to adjust defaults, then relaunch with a target when ready.",
+                border_style="bright_blue",
+                padding=(1, 2),
+            )
+        )
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            GATEWAY.stop_dashboard()
+        raise SystemExit(0)
+
     if not _has_explicit_target:
         # Interactive launcher when the user did not choose a target explicitly.
         _domain, _profile, _mode, _fresh, _task, _model, _autonomy, _provider, _api_base, _api_key_env = interactive_startup(
-            default_target="",
+            default_target=_domain,
             default_mode=_mode,
-            default_profile="standard",
+            default_profile=_profile,
             default_task=_task,
             default_model=_model,
             default_autonomy=_autonomy,
@@ -6711,6 +6823,18 @@ if __name__ == "__main__":
         api_base=_api_base,
         api_key_env=_api_key_env,
     )
+    WORKSPACE.save_runtime({
+        "provider": _provider,
+        "model": MODEL,
+        "autonomy": _autonomy,
+        "mission": _task,
+        "mode": _mode,
+        "target": _domain,
+        "profile": _profile,
+        "api_base": _api_base,
+        "api_key_env": _api_key_env,
+        "open_dashboard": _dashboard,
+    })
     if _mode == "network":
         run_agent(
             _domain,
