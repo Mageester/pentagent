@@ -36,6 +36,13 @@ def _table(headers: list[str], rows: list[list[Any]]) -> str:
     return f'<div class="table"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
+def _short(value: Any, limit: int = 160) -> str:
+    text = "" if value is None else str(value).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
 def render_dashboard(snapshot: Dict[str, Any]) -> str:
     runtime = snapshot.get("runtime", {})
     workspace = snapshot.get("workspace", {})
@@ -68,6 +75,35 @@ def render_dashboard(snapshot: Dict[str, Any]) -> str:
         [s.get("session_id", ""), s.get("mode", ""), s.get("domain", ""), s.get("goal", ""), s.get("updated_at", "")]
         for s in sessions[:8]
     ]
+    recent_events = checkpoint.get("recent_events", []) or []
+    trace_rows = []
+    for event in recent_events[-12:]:
+        if not isinstance(event, dict):
+            continue
+        etype = str(event.get("type", "event")).strip() or "event"
+        step = event.get("step", "")
+        data = event.get("data", {})
+        if not isinstance(data, dict):
+            data = {}
+        if etype == "decision":
+            action = str(data.get("action", "")).strip()
+            tool = str(data.get("tool", "")).strip()
+            why = str(data.get("why") or data.get("reason") or data.get("summary") or "").strip()
+            source = "decision"
+            detail = " | ".join([part for part in (action, tool, why) if part]) or "(no details)"
+        elif etype == "tool_result":
+            tool = str(event.get("tool", "")).strip()
+            source = tool or "tool_result"
+            status = "ok" if event.get("ok") else "fail"
+            preview = str(event.get("output") or event.get("error") or "").strip()
+            detail = f"{status} | {_short(preview, 140)}"
+        elif etype in {"repeat_observed", "blocked_action"}:
+            source = str(event.get("tool", "")).strip() or etype
+            detail = _short(event.get("note") or event.get("signature") or "", 160)
+        else:
+            source = str(event.get("tool", "")).strip() or etype
+            detail = _short(json.dumps(event, ensure_ascii=False), 140)
+        trace_rows.append([step, etype, source, detail])
 
     docs = workspace.get("docs", {})
     doc_rows = [[name, "present" if present else "missing"] for name, present in docs.items()]
@@ -108,6 +144,7 @@ input,select,textarea,button{{font:inherit}} input,select,textarea{{width:100%;p
 <section class="panel"><div class="head"><div><h2>Skills</h2><p>File-based packs plus built-in tool descriptors.</p></div></div><div class="split"><div class="inset"><div class="eyebrow">Catalog</div><div class="stack">{_pill("total", skills.get("total", 0))}{_pill("sources", len(skills.get("sources", {}) or {}))}{_pill("categories", len(skills.get("categories", {}) or {}))}</div><div class="eyebrow" style="margin-top:1rem;">Samples</div>{_kv({k: ', '.join(v[:5]) for k, v in (skills.get("samples", {}) or {}).items()})}</div><div class="inset"><ul class="list">{''.join(f'<li><span>{_esc(s.get("name", ""))}</span><small>{_esc(s.get("category", ""))} | { _esc(s.get("kind", "")) } | {_esc(s.get("source", ""))}</small><small>{_esc(s.get("description", ""))}</small></li>' for s in skill_details[:12]) or '<li class="empty">No file-based skill packs discovered yet</li>'}</ul></div></div></section>
 <section class="panel"><div class="head"><div><h2>Sessions</h2><p>Persisted workspace sessions.</p></div></div>{_table(["Session","Mode","Target","Goal","Updated"], session_rows)}</section>
 <section class="panel"><div class="head"><div><h2>Evidence</h2><p>Recent findings, notes, and report destinations.</p></div></div><div class="split"><div class="inset"><div class="eyebrow">Recent findings</div>{_table(["Severity","Kind","URL","Detail"], top_findings)}</div><div class="inset"><div class="eyebrow">Recent notes</div>{_table(["Note"], recent_notes)}</div></div><div class="inset" style="margin-top:14px"><div class="eyebrow">Report artifacts</div>{_kv(reports)}</div></section>
+<section class="panel"><div class="head"><div><h2>Live Trace</h2><p>Recent decisions, tool calls, and repeat handling from the current run.</p></div></div>{_table(["Step","Type","Source","Detail"], trace_rows)}</section>
 <section class="panel"><div class="head"><div><h2>Raw State</h2><p>Checkpoint JSON for deeper inspection.</p></div></div><details><summary>Open checkpoint JSON</summary><pre>{_esc(json.dumps(checkpoint, indent=2, ensure_ascii=False)[:12000])}</pre></details></section>
 <div class="footer"><span>Auto-refreshes every 5 seconds.</span><span>Workspace root: <code>{_esc(workspace.get("root", ""))}</code></span></div>
 </div></body></html>"""

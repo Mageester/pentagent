@@ -485,6 +485,26 @@ def _latest_tool_text(state: "AgentState") -> str:
     return ""
 
 
+def _latest_decision_text(state: "AgentState") -> str:
+    for event in reversed(state.recent_events):
+        if event.get("type") != "decision":
+            continue
+        data = event.get("data", {})
+        if not isinstance(data, dict):
+            data = {}
+        action = str(data.get("action", "")).strip()
+        tool = str(data.get("tool", "")).strip()
+        why = str(
+            data.get("why")
+            or data.get("reason")
+            or data.get("summary")
+            or ""
+        ).strip()
+        parts = [piece for piece in (action, tool, why) if piece]
+        return " | ".join(parts[:3])
+    return ""
+
+
 def _queue_preview(state: "AgentState", limit: int = 4) -> str:
     if not state.queued_urls:
         return ""
@@ -503,6 +523,7 @@ def ui_dashboard(state: "AgentState") -> None:
     latest_finding = _latest_finding_text(state)
     latest_note = _latest_note_text(state)
     latest_tool = _latest_tool_text(state)
+    latest_decision = _latest_decision_text(state)
     queue_preview = _queue_preview(state)
     graph_summary = _attack_graph_summary(state)
     target_profile = getattr(state, "target_profile", "") or _target_profile_from_state()
@@ -552,6 +573,7 @@ def ui_dashboard(state: "AgentState") -> None:
         grid.add_row(
             f"[dim]Latest note[/]  {latest_note or 'none'}",
             f"[dim]Latest finding[/]  {latest_finding or 'none'}",
+            f"[dim]Latest decision[/]  {latest_decision or 'none'}",
             "",
             "",
         )
@@ -588,6 +610,7 @@ def ui_dashboard(state: "AgentState") -> None:
             f"[dim]Last tool[/]  {latest_tool or 'none'}",
             f"[dim]Latest note[/]  {latest_note or 'none'}",
             f"[dim]Latest finding[/]  {latest_finding or 'none'}",
+            f"[dim]Latest decision[/]  {latest_decision or 'none'}",
         )
     console.print(Panel(grid, title="[bold]Dashboard[/]",
                         border_style="bright_blue", padding=(0, 2)))
