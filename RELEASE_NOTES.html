@@ -503,7 +503,8 @@
         <h1>Autonomous pentest operator.<br>More evidence. Less looping.</h1>
         <p class="hero-copy">
           This release pushes PentAgent closer to a real operator console: it profiles the target, builds an attack graph,
-          pivots away from failing tools, and turns scan results into a browser-readable release page instead of just raw logs.
+          pivots away from failing tools, and now treats the model layer as a provider-agnostic runtime with a real
+          skill registry instead of a single hardcoded Ollama loop.
         </p>
         <div class="hero-summary">
           <span class="pill"><span class="dot"></span> Evidence-driven planning</span>
@@ -511,6 +512,8 @@
           <span class="pill"><span class="dot"></span> HTML + Markdown reports</span>
           <span class="pill"><span class="dot"></span> Mission-focused operator mode</span>
           <span class="pill"><span class="dot"></span> Free or balanced autonomy</span>
+          <span class="pill"><span class="dot"></span> Local or API-backed model providers</span>
+          <span class="pill"><span class="dot"></span> Skill registry / platform runtime</span>
         </div>
       </article>
 
@@ -563,6 +566,16 @@
           <p>Launch the agent with a broad objective and choose how much guidance it gets: free autonomy for maximum model freedom or balanced autonomy for a little more kickoff structure.</p>
         </article>
         <article class="card feature">
+          <div class="tag">Model layer</div>
+          <h3>Provider-agnostic backends</h3>
+          <p>Use a local Ollama model now, then switch to an OpenAI-compatible API backend later when you want to offload compute without rewriting the workflow.</p>
+        </article>
+        <article class="card feature">
+          <div class="tag">Platform view</div>
+          <h3>Skill registry</h3>
+          <p>The built-in tools are cataloged as skills by category, which gives the model richer context about what it can do and makes the framework feel more like an agent platform.</p>
+        </article>
+        <article class="card feature">
           <div class="tag">Reliability</div>
           <h3>Failure-aware tool routing</h3>
           <p>Timeouts, repeated actions, and missing tool failures now feed back into the prompt so the model can pivot instead of looping forever.</p>
@@ -610,7 +623,16 @@
           </div>
         </article>
         <article class="card timeline-item">
-          <div class="timeline-time">03 / Tooling</div>
+          <div class="timeline-time">03 / Model runtime</div>
+          <div>
+            <h3>Provider-agnostic model layer</h3>
+            <p>
+              The runtime now supports local Ollama models and OpenAI-compatible API backends. That means you can keep the agent fully local today and offload model inference later without rewriting the orchestration loop.
+            </p>
+          </div>
+        </article>
+        <article class="card timeline-item">
+          <div class="timeline-time">04 / Tooling</div>
           <div>
             <h3>WSL-first command execution</h3>
             <p>
@@ -619,7 +641,7 @@
           </div>
         </article>
         <article class="card timeline-item">
-          <div class="timeline-time">04 / Recovery</div>
+          <div class="timeline-time">05 / Recovery</div>
           <div>
             <h3>Timeout and repeat detection</h3>
             <p>
@@ -628,7 +650,7 @@
           </div>
         </article>
         <article class="card timeline-item">
-          <div class="timeline-time">05 / Reporting</div>
+          <div class="timeline-time">06 / Reporting</div>
           <div>
             <h3>Better terminal and browser output</h3>
             <p>
@@ -663,6 +685,14 @@
                 <td>Profiles public web targets, localhost/lab targets, and network scopes so it can choose the right recon path.</td>
               </tr>
               <tr>
+                <td>Model providers</td>
+                <td>Supports local Ollama backends now and OpenAI-compatible API backends later when you want to offload compute.</td>
+              </tr>
+              <tr>
+                <td>Skill registry</td>
+                <td>Catalogs built-in tools as skills so the model can reason about categories and capabilities more like a platform.</td>
+              </tr>
+              <tr>
                 <td>Finding confidence</td>
                 <td>Merges repeated evidence into a single stronger record rather than spamming duplicate noise.</td>
               </tr>
@@ -687,7 +717,7 @@
 
   cd C:\Agent
   .\.venv\Scripts\Activate.ps1
-  python agent.py --model qwen3-coder:30b --autonomy free --mission "map the attack surface, validate high-value leads, and report only actionable vulns with repro steps and remediation"
+  python agent.py --model qwen3-coder:30b --provider ollama --autonomy free --mission "map the attack surface, validate high-value leads, and report only actionable vulns with repro steps and remediation"
 
 Suggested mission:
 

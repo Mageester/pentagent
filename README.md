@@ -8,14 +8,14 @@
 
 ## Overview
 
-PentAgent is a self-bootstrapping, autonomous penetration testing framework designed for authorized security assessments. It uses a local large language model via Ollama to orchestrate multi-phase security testing without cloud dependencies or API keys.
+PentAgent is a self-bootstrapping, autonomous penetration testing framework designed for authorized security assessments. It now uses a provider-agnostic model layer so you can run fully local models through Ollama today and switch to OpenAI-compatible API backends later when you want to offload compute without rewriting the agent.
 
 The agent operates as an intelligent decision loop: it runs reconnaissance, analyzes results, decides what to test next, executes security tools, and produces structured reports — all without human intervention after target specification.
 
 **This tool is intended exclusively for authorized penetration testing and security validation of systems you own or have explicit written permission to test.**
 
-At launch you choose the target, mode, scan profile, model, autonomy style, and an optional operator mission. The agent auto-pulls the selected Ollama model if it is missing, prefers Kali/Athena WSL tooling when available, and keeps going when optional tools fail so it can pivot instead of stalling.
-You can also choose an autonomy style at launch. `free` lets the model drive the tool path with minimal orchestration; `balanced` keeps a little more kickoff structure.
+At launch you choose the target, mode, scan profile, model, model provider, autonomy style, and an optional operator mission. The agent auto-pulls the selected Ollama model if it is missing, prefers Kali/Athena WSL tooling when available, and keeps going when optional tools fail so it can pivot instead of stalling.
+You can also choose an autonomy style at launch. `free` lets the model drive the tool path with minimal orchestration; `balanced` keeps a little more kickoff structure. The underlying skill registry is now explicit, so the agent can reason about its capabilities like a platform rather than a script.
 
 ---
 
@@ -34,6 +34,8 @@ You can also choose an autonomy style at launch. `free` lets the model drive the
 | **Attack-Graph Memory** | Tracks discovered surfaces, findings, confidence, and pivots across the run |
 | **Operator Mission Setting** | Set a broad custom mission at launch and let the agent choose the best authorized pivots |
 | **Model Selection at Startup** | Pick the Ollama tag you want, and the agent auto-pulls it if it is missing |
+| **Provider Selection at Startup** | Run a local Ollama backend or an OpenAI-compatible API backend when you want to offload compute |
+| **Skill Registry** | Built-in skills are cataloged by category so the agent can reason about tools more like a platform |
 | **WSL Tool Routing** | Routes Linux recon and exploitation tools to the best available Kali/Athena WSL distro |
 | **Autonomy Selection** | Choose `free` for maximum model freedom or `balanced` for a bit more kickoff structure |
 | **Rich Terminal UI** | ASCII art banner, live progress, structured tool output, dashboards |
@@ -110,6 +112,9 @@ ollama pull qwen3-coder:30b
 
 Recommended default for strongest reasoning is `qwen3-coder:30b`, but you can choose any Ollama model tag at startup or with `--model`.
 The agent auto-pulls the selected model if it is missing.
+This only applies when you choose the local `ollama`/`local` provider; API-backed runs do not require Ollama on the host.
+
+If you want to offload reasoning to an API-backed model later, choose the API-compatible provider at startup or launch with `--provider api` and point it at an OpenAI-compatible endpoint.
 
 ---
 
@@ -125,6 +130,7 @@ Presents an interactive menu:
 - Target or subnet input
 - Mode selection (web / network)
 - Model selection
+- Provider selection (`ollama` / `api`)
 - Autonomy selection (`free` / `balanced`)
 - Scan profile selection (quick / standard / deep)
 - Optional operator mission for broad authorized work you want prioritized
@@ -139,6 +145,7 @@ python agent.py --resume                 # resume previous session
 python agent.py example.com --mission "find IDORs in profile endpoints; map admin panels"
 python agent.py example.com --objective "map attack surface and validate auth/session flaws"
 python agent.py example.com --autonomy free
+python agent.py example.com --provider api --api-base https://your-openai-compatible-endpoint.example/v1
 ```
 
 You can also enter a mission interactively. Separate multiple mission items with semicolons.

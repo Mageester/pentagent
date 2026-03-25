@@ -55,7 +55,6 @@ for _stream in (sys.stdout, sys.stderr):
 #  PHASE 0 — SELF-BOOTSTRAP  (before 3rd-party imports)
 # ═══════════════════════════════════════════════════════════
 _REQUIRED = {
-    "ollama": "ollama",
     "requests": "requests",
     "bs4": "beautifulsoup4",
     "lxml": "lxml",
@@ -254,7 +253,6 @@ if _DETECTED_TOOLS.get("burpsuite"):
 # ═══════════════════════════════════════════════════════════
 #  PHASE 1 — THIRD-PARTY IMPORTS  (guaranteed present)
 # ═══════════════════════════════════════════════════════════
-import ollama  # type: ignore
 import requests  # type: ignore
 import urllib3  # type: ignore
 from bs4 import BeautifulSoup  # type: ignore
@@ -272,12 +270,25 @@ from security_tools import (  # type: ignore
     check_cors, check_mixed_content, check_email_security,
     check_info_disclosure, check_security_headers_deep,
 )
+from llm_backends import build_backend, describe_backend  # type: ignore
+from skill_registry import (  # type: ignore
+    build_skill_catalog,
+    skill_category_counts,
+    skill_overview_lines,
+    skill_snapshot,
+)
 
 # ═══════════════════════════════════════════════════════════
 #  CONFIGURATION
 # ═══════════════════════════════════════════════════════════
 DEFAULT_MODEL = "qwen3-coder:30b"
+DEFAULT_PROVIDER = "ollama"
+DEFAULT_API_BASE = os.getenv("PENTAGENT_API_BASE", "").strip()
+DEFAULT_API_KEY_ENV = os.getenv("PENTAGENT_API_KEY_ENV", "OPENAI_API_KEY").strip() or "OPENAI_API_KEY"
 MODEL = DEFAULT_MODEL
+MODEL_PROVIDER = DEFAULT_PROVIDER
+MODEL_API_BASE = DEFAULT_API_BASE
+MODEL_API_KEY_ENV = DEFAULT_API_KEY_ENV
 DEFAULT_DOMAIN = "getaxiom.ca"
 
 OUTPUT_DIR = Path("audit_output")
@@ -311,7 +322,7 @@ for _d in [OUTPUT_DIR, SCREENSHOTS_DIR, LIGHTHOUSE_DIR, SCAN_LOGS_DIR]:
 #  SHARED CLIENTS
 # ═══════════════════════════════════════════════════════════
 # Explicit IPv4 — avoids Windows IPv6 "localhost" resolution bug
-llm = ollama.Client(host="http://127.0.0.1:11434")
+llm = None
 
 http = requests.Session()
 http.headers.update({"User-Agent": "SiteAuditAgent/2.0 (+self-audit)"})
@@ -382,9 +393,11 @@ def ui_banner(domain: str, profile: str = "standard") -> None:
     lh_icon = "[green]✔[/]" if LIGHTHOUSE_AVAILABLE else "[red]✘[/]"
     avail = [t for t, ok in _DETECTED_TOOLS.items() if ok]
     avail_str = ", ".join(avail) if avail else "[dim]none detected[/]"
+    backend_text = describe_backend(llm)
     lines = [
         f"[dim]Target:[/]   [bold bright_white]{domain}[/]",
         f"[dim]Model:[/]    [bold]{MODEL}[/]",
+        f"[dim]Provider:[/] [bold]{MODEL_PROVIDER}[/] [dim]({compact_text(backend_text, 52)})[/]",
         f"[dim]Profile:[/]  [bold]{profile}[/]",
     ]
     if STATE is not None and getattr(STATE, "target_profile", "").strip():
@@ -397,6 +410,7 @@ def ui_banner(domain: str, profile: str = "standard") -> None:
         "",
         f"  [green]✔[/] Ollama   {pw_icon} Playwright   {lh_icon} Lighthouse",
         f"  [dim]External tools:[/] {avail_str}",
+        f"  [dim]Skills:[/] {len(SKILL_CATALOG)} built-in skills across {len(SKILL_COUNTS)} categories",
     ])
     if not LIGHTHOUSE_AVAILABLE:
         lines.append(f"  [dim]{_LH_MSG}[/]")
@@ -491,6 +505,7 @@ def ui_dashboard(state: "AgentState") -> None:
         f"{item['tool']}:{item['failure']}/{item['timeouts']}"
         for item in tool_health
     ) or "clean"
+    provider_text = compact_text(describe_backend(llm), 56)
     if state.mode == "network":
         grid.add_row(
             f"[bold cyan]Subnets[/]  {len(getattr(state, 'network_subnets', []))}",
@@ -509,15 +524,22 @@ def ui_dashboard(state: "AgentState") -> None:
             f"[dim]Mission[/]  {task or 'none'}",
         )
         grid.add_row(
+            f"[dim]Provider[/]  {provider_text}",
+            f"[dim]Skills[/]  {len(SKILL_CATALOG)}",
+            f"[dim]Categories[/]  {len(SKILL_COUNTS)}",
+            f"[dim]Graph[/]  {graph_summary['nodes']}n/{graph_summary['edges']}e",
+        )
+        grid.add_row(
             f"[dim]Profile[/]  {target_profile}",
             f"[dim]Autonomy[/]  {autonomy or 'free'}",
-            f"[dim]Graph[/]  {graph_summary['nodes']}n/{graph_summary['edges']}e",
             f"[dim]Last tool[/]  {latest_tool or 'none'}",
+            f"[dim]Tool health[/]  {compact_text(tool_health_text, 88)}",
         )
         grid.add_row(
             f"[dim]Latest note[/]  {latest_note or 'none'}",
             f"[dim]Latest finding[/]  {latest_finding or 'none'}",
-            f"[dim]Tool health[/]  {compact_text(tool_health_text, 88)}",
+            "",
+            "",
         )
     else:
         grid.add_row(
@@ -537,14 +559,15 @@ def ui_dashboard(state: "AgentState") -> None:
             f"[dim]Graph[/]  {graph_summary['nodes']}n/{graph_summary['edges']}e",
         )
         grid.add_row(
+            f"[dim]Provider[/]  {provider_text}",
+            f"[dim]Skills[/]  {len(SKILL_CATALOG)}",
+            f"[dim]Categories[/]  {len(SKILL_COUNTS)}",
+            f"[dim]Tool health[/]  {compact_text(tool_health_text, 88)}",
+        )
+        grid.add_row(
             f"[dim]Last tool[/]  {latest_tool or 'none'}",
             f"[dim]Latest note[/]  {latest_note or 'none'}",
             f"[dim]Latest finding[/]  {latest_finding or 'none'}",
-        )
-        grid.add_row(
-            f"[dim]Tool health[/]  {compact_text(tool_health_text, 88)}",
-            "",
-            "",
         )
     console.print(Panel(grid, title="[bold]Dashboard[/]",
                         border_style="bright_blue", padding=(0, 2)))
@@ -579,6 +602,9 @@ class AgentState:
     goal: str
     operator_task: str = ""
     autonomy_mode: str = "free"
+    llm_provider: str = "ollama"
+    llm_base_url: str = ""
+    llm_api_key_env: str = "OPENAI_API_KEY"
     target_profile: str = ""
     mode: str = "web"
     step: int = 0
@@ -607,6 +633,9 @@ class AgentState:
             "goal": self.goal,
             "operator_task": self.operator_task,
             "autonomy_mode": self.autonomy_mode,
+            "llm_provider": self.llm_provider,
+            "llm_base_url": self.llm_base_url,
+            "llm_api_key_env": self.llm_api_key_env,
             "target_profile": self.target_profile,
             "step": self.step,
             "network_subnets": self.network_subnets,
@@ -636,6 +665,9 @@ class AgentState:
             goal=data["goal"],
             operator_task=data.get("operator_task", ""),
             autonomy_mode=data.get("autonomy_mode", "free"),
+            llm_provider=data.get("llm_provider", "ollama"),
+            llm_base_url=data.get("llm_base_url", ""),
+            llm_api_key_env=data.get("llm_api_key_env", "OPENAI_API_KEY"),
             target_profile=data.get("target_profile", ""),
             step=data.get("step", 0),
             network_subnets=data.get("network_subnets", []),
@@ -4267,6 +4299,11 @@ def _build_report_context() -> Dict[str, Any]:
         "graph_summary": graph_summary,
         "tool_health": tool_health,
         "target_profile": getattr(STATE, "target_profile", "") or _target_profile_from_state(),
+        "llm_provider": getattr(STATE, "llm_provider", DEFAULT_PROVIDER),
+        "llm_base_url": getattr(STATE, "llm_base_url", ""),
+        "llm_api_key_env": getattr(STATE, "llm_api_key_env", DEFAULT_API_KEY_ENV),
+        "skill_counts": SKILL_COUNTS,
+        "skill_total": len(SKILL_CATALOG),
     }
 
 
@@ -4308,12 +4345,18 @@ def tool_write_markdown_summary(path: str = "") -> ToolResult:
     graph_summary = ctx["graph_summary"]
     tool_health = ctx["tool_health"]
     target_profile = ctx["target_profile"]
+    llm_provider = ctx["llm_provider"]
+    skill_total = ctx["skill_total"]
+    skill_counts = ctx["skill_counts"]
 
     lines: List[str] = []
     lines.append(f"# Website Audit Summary for `{STATE.domain}`")
     lines.append("")
     lines.append("## Executive Summary")
     lines.append(f"- Target profile: {target_profile}.")
+    lines.append(f"- LLM provider: {llm_provider}.")
+    lines.append(f"- Built-in skills: {skill_total} across {len(skill_counts)} categories.")
+    lines.append(f"- Autonomy mode: {getattr(STATE, 'autonomy_mode', 'free')}.")
     if getattr(STATE, "operator_task", "").strip():
         lines.append("- Operator mission:")
         for item in _operator_task_items():
@@ -4428,6 +4471,9 @@ def tool_write_html_report(path: str = "") -> ToolResult:
     graph_summary = ctx["graph_summary"]
     tool_health = ctx["tool_health"]
     target_profile = ctx["target_profile"]
+    llm_provider = ctx["llm_provider"]
+    skill_total = ctx["skill_total"]
+    skill_counts = ctx["skill_counts"]
 
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
     severity_labels = {
@@ -4468,6 +4514,9 @@ def tool_write_html_report(path: str = "") -> ToolResult:
         ("Low", str(sev_counts.get("low", 0))),
         ("Info", str(sev_counts.get("info", 0))),
         ("Notes", str(len(notes))),
+        ("Provider", str(llm_provider)),
+        ("Skills", str(skill_total)),
+        ("Categories", str(len(skill_counts))),
         ("Graph Nodes", str(graph_summary["nodes"])),
         ("Graph Edges", str(graph_summary["edges"])),
     ]
@@ -4837,7 +4886,8 @@ def tool_write_html_report(path: str = "") -> ToolResult:
         Primary categories: {html_escape(top_kind_text)}.<br>
         {html_escape(high_summary)}.<br>
         {html_escape(exploit_summary)}.<br>
-        Target profile: {html_escape(target_profile)}.
+        Target profile: {html_escape(target_profile)}.<br>
+        Provider: {html_escape(str(llm_provider))} · Built-in skills: {html_escape(str(skill_total))} across {html_escape(str(len(skill_counts)))} categories.
       </div>
     </section>
 
@@ -4964,6 +5014,9 @@ TOOL_DESCRIPTIONS = {
     "write_html_report": "Write HTML report. no args",
 }
 
+SKILL_CATALOG = build_skill_catalog(TOOL_DESCRIPTIONS)
+SKILL_COUNTS = skill_category_counts(SKILL_CATALOG)
+
 
 def _get_content(resp: Any) -> str:
     try:
@@ -5032,6 +5085,10 @@ def build_system_prompt() -> str:
     tool_lines = "\n".join(
         f"  - {name}: {desc}" for name, desc in TOOL_DESCRIPTIONS.items()
     )
+    skill_lines = "\n".join(
+        f"  - {line}" for line in skill_overview_lines(SKILL_CATALOG)
+    )
+    skill_total = len(SKILL_CATALOG)
     avail = [t for t, ok in _DETECTED_TOOLS.items() if ok]
     ext_tools = ", ".join(avail) if avail else "none"
     task_block = _operator_task_block()
@@ -5077,7 +5134,7 @@ To start a scan via Burp REST API:
   }}'
 To check scan status:
   curl http://127.0.0.1:1337/v0.1/scan/{{task_id}}"""
-    return f"""You are an elite autonomous penetration testing agent.
+    return f"""You are an elite autonomous penetration testing agent with a skill registry and provider-agnostic model layer.
 You are AUTHORIZED to test ONLY this target domain: {{domain}}
 
 Objective: Perform a comprehensive security assessment.
@@ -5090,6 +5147,9 @@ Focus areas:
 
 You have FULL TERMINAL ACCESS via run_command. You can run ANY command.
 External tools detected: {ext_tools}{wsl_info}{burp_info}
+
+Skill registry ({skill_total} built-in skills):
+{skill_lines}
 
 You have COMPLETE FREEDOM to run any standard security/recon tool without asking.
 Standard tools include: subfinder, httpx, wafw00f, nmap, nikto, sqlmap, nuclei, dirb,
@@ -5192,6 +5252,7 @@ def build_user_prompt(state: AgentState) -> str:
     ][:8]
     graph_summary = _attack_graph_summary(state)
     tool_health = _tool_health_summary(state)
+    skills = skill_snapshot(SKILL_CATALOG)
     return json.dumps({
         "goal": state.goal, "domain": state.domain, "step": state.step,
         "operator_task": state.operator_task,
@@ -5211,6 +5272,7 @@ def build_user_prompt(state: AgentState) -> str:
         "blocked_actions": blocked_actions,
         "attack_graph": graph_summary,
         "tool_health": tool_health,
+        "skill_registry": skills,
     }, indent=2)
 
 
@@ -5390,6 +5452,18 @@ def _build_universal_pentest_directive(mode: str) -> str:
     return "\n".join(lines)
 
 
+def _configure_llm_backend(provider: str, model: str, *,
+                           api_base: str = "",
+                           api_key_env: str = "OPENAI_API_KEY") -> None:
+    global llm
+    llm = build_backend(
+        provider,
+        model,
+        api_base=api_base,
+        api_key_env=api_key_env,
+    )
+
+
 def _normalize_llm_decision(decision: Any) -> Dict[str, Any]:
     if not isinstance(decision, dict):
         return {"action": "summarize",
@@ -5422,6 +5496,8 @@ def _normalize_llm_decision(decision: Any) -> Dict[str, Any]:
 
 def chat_json(messages: List[Dict[str, str]]) -> Dict[str, Any]:
     # Force JSON-only responses from the model.
+    if llm is None:
+        return {"action": "summarize", "summary": "LLM backend is not initialized"}
     try:
         with console.status("[bold cyan]LLM deciding…", spinner="dots"):
             resp = llm.chat(
@@ -5593,7 +5669,9 @@ def summarize_memory() -> None:
 #  AGENT RUNNER
 # ═══════════════════════════════════════════════════════════
 def bootstrap_state(domain: str, mode: str = "web",
-                    operator_task: str = "", autonomy_mode: str = "free") -> AgentState:
+                    operator_task: str = "", autonomy_mode: str = "free",
+                    llm_provider: str = "ollama", llm_base_url: str = "",
+                    llm_api_key_env: str = "OPENAI_API_KEY") -> AgentState:
     raw = domain.strip()
     domain = _normalize_scope_target(raw, mode)
     task_text = (operator_task or "").strip()
@@ -5607,6 +5685,9 @@ def bootstrap_state(domain: str, mode: str = "web",
             goal=f"Full network penetration test of {domain}{task_suffix}",
             operator_task=task_text,
             autonomy_mode=autonomy_mode,
+            llm_provider=llm_provider,
+            llm_base_url=llm_base_url,
+            llm_api_key_env=llm_api_key_env,
             target_profile=_infer_target_profile(domain, mode, ""),
             queued_urls=[],
         )
@@ -5619,6 +5700,9 @@ def bootstrap_state(domain: str, mode: str = "web",
         goal=f"Full penetration test and security assessment of {domain}{task_suffix}",
         operator_task=task_text,
         autonomy_mode=autonomy_mode,
+        llm_provider=llm_provider,
+        llm_base_url=llm_base_url,
+        llm_api_key_env=llm_api_key_env,
         target_profile=_infer_target_profile(domain, mode, start_url),
         queued_urls=[start_url],
     )
@@ -5713,6 +5797,10 @@ def build_network_system_prompt() -> str:
     tool_lines = "\n".join(
         f"  - {name}: {desc}" for name, desc in TOOL_DESCRIPTIONS.items()
     )
+    skill_lines = "\n".join(
+        f"  - {line}" for line in skill_overview_lines(SKILL_CATALOG)
+    )
+    skill_total = len(SKILL_CATALOG)
     avail = [t for t, ok in _DETECTED_TOOLS.items() if ok]
     ext_tools = ", ".join(avail) if avail else "none"
     task_block = _operator_task_block()
@@ -5744,7 +5832,7 @@ Examples:
 - wsl -d kali-linux nmap --script vuln <host>
 - wsl -d kali-linux masscan <subnet> -p1-65535 --rate=1000
 PREFER WSL tools — they are more powerful than native Windows."""
-    return f"""You are an elite autonomous NETWORK penetration testing agent.
+    return f"""You are an elite autonomous NETWORK penetration testing agent with a skill registry and provider-agnostic model layer.
 You are authorized to test the ENTIRE network: {{target}}
 
 Objective: Perform a comprehensive network security assessment.
@@ -5784,6 +5872,9 @@ Reporting:
 
 You have FULL TERMINAL ACCESS via run_command.
 External tools: {ext_tools}{wsl_info}
+
+Skill registry ({skill_total} built-in skills):
+{skill_lines}
 
 You have COMPLETE FREEDOM to run any tool. You are FULLY AUTONOMOUS. Do not ask for human permission for actions; execute exploits or credential attacks immediately if you judge them necessary.
 {task_prompt}
@@ -6074,8 +6165,11 @@ def _run_kickoff_steps(steps: List[Tuple[str, Dict[str, Any]]],
 
 def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
               fresh: bool = False, operator_task: str = "",
-              autonomy_mode: str = "free") -> None:
-    global STATE
+              autonomy_mode: str = "free",
+              llm_provider: str = DEFAULT_PROVIDER,
+              llm_base_url: str = DEFAULT_API_BASE,
+              llm_api_key_env: str = DEFAULT_API_KEY_ENV) -> None:
+    global STATE, MODEL_PROVIDER, MODEL_API_BASE, MODEL_API_KEY_ENV
     agent_start = time.time()
 
     cp = str(CHECKPOINT_PATH)
@@ -6083,6 +6177,23 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
     scope_target = _normalize_scope_target(domain, run_mode)
     task_text = (operator_task or getattr(run_agent, "_task", "") or "").strip()
     autonomy_text = (autonomy_mode or getattr(run_agent, "_autonomy", "free") or "free").strip() or "free"
+    provider_text = (llm_provider or getattr(run_agent, "_provider", DEFAULT_PROVIDER) or DEFAULT_PROVIDER).strip() or DEFAULT_PROVIDER
+    base_text = (llm_base_url or getattr(run_agent, "_api_base", DEFAULT_API_BASE) or "").strip()
+    api_key_env_text = (llm_api_key_env or getattr(run_agent, "_api_key_env", DEFAULT_API_KEY_ENV) or DEFAULT_API_KEY_ENV).strip() or DEFAULT_API_KEY_ENV
+    MODEL_PROVIDER = provider_text
+    MODEL_API_BASE = base_text
+    MODEL_API_KEY_ENV = api_key_env_text
+
+    try:
+        _configure_llm_backend(
+            provider_text,
+            MODEL,
+            api_base=base_text,
+            api_key_env=api_key_env_text,
+        )
+    except Exception as exc:
+        console.print(f"[bold red]LLM backend init failed:[/] {exc}")
+        sys.exit(1)
 
     if not fresh and resume and os.path.exists(cp):
         loaded_state = AgentState.load(cp)
@@ -6091,6 +6202,9 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
             and loaded_state.mode == run_mode
             and (loaded_state.operator_task or "").strip() == task_text
             and (getattr(loaded_state, "autonomy_mode", "free") or "free").strip() == autonomy_text
+            and (getattr(loaded_state, "llm_provider", DEFAULT_PROVIDER) or DEFAULT_PROVIDER).strip() == provider_text
+            and (getattr(loaded_state, "llm_base_url", "") or "").strip() == base_text
+            and (getattr(loaded_state, "llm_api_key_env", DEFAULT_API_KEY_ENV) or DEFAULT_API_KEY_ENV).strip() == api_key_env_text
         ):
             STATE = loaded_state
             console.print(
@@ -6098,13 +6212,29 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
             )
         else:
             console.print(
-                "[bold yellow]Checkpoint does not match requested target, mode, mission, or autonomy; "
+                "[bold yellow]Checkpoint does not match requested target, mode, mission, autonomy, or provider; "
                 "starting a fresh session.[/]"
             )
-            STATE = bootstrap_state(domain, mode=run_mode, operator_task=task_text, autonomy_mode=autonomy_text)
+            STATE = bootstrap_state(
+                domain,
+                mode=run_mode,
+                operator_task=task_text,
+                autonomy_mode=autonomy_text,
+                llm_provider=provider_text,
+                llm_base_url=base_text,
+                llm_api_key_env=api_key_env_text,
+            )
             console.print(f"[bold green]New session[/] for [bold]{STATE.domain}[/]")
     else:
-        STATE = bootstrap_state(domain, mode=run_mode, operator_task=task_text, autonomy_mode=autonomy_text)
+        STATE = bootstrap_state(
+            domain,
+            mode=run_mode,
+            operator_task=task_text,
+            autonomy_mode=autonomy_text,
+            llm_provider=provider_text,
+            llm_base_url=base_text,
+            llm_api_key_env=api_key_env_text,
+        )
         console.print(f"[bold green]New session[/] for [bold]{STATE.domain}[/]")
 
     ui_banner(STATE.domain, profile=getattr(run_agent, '_profile', 'standard'))
@@ -6367,8 +6497,8 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
 # ═══════════════════════════════════════════════════════════
 #  INTERACTIVE STARTUP
 # ═══════════════════════════════════════════════════════════
-def interactive_startup() -> Tuple[str, str, str, bool, str, str, str]:
-    """Interactive menu. Returns (target, profile, mode, fresh, task, model, autonomy)."""
+def interactive_startup() -> Tuple[str, str, str, bool, str, str, str, str, str, str]:
+    """Interactive menu. Returns (target, profile, mode, fresh, task, model, autonomy, provider, api_base, api_key_env)."""
     console.print(_ASCII_BANNER)
     console.print(Panel(
         "[bold]Autonomous Pentest Agent[/]\n"
@@ -6392,10 +6522,27 @@ def interactive_startup() -> Tuple[str, str, str, bool, str, str, str]:
     else:
         raw = Prompt.ask("[bold]Target domain[/]", default=DEFAULT_DOMAIN)
     target = raw.strip()
+    provider = Prompt.ask(
+        "[bold]LLM provider[/]",
+        choices=["ollama", "local", "api", "openai-compatible"],
+        default="ollama",
+    ).strip().lower()
+    provider = "ollama" if provider == "local" else provider
     model = Prompt.ask(
         "[bold]Model[/] [dim](recommended: qwen3-coder:30b; any Ollama tag works)[/]",
         default=DEFAULT_MODEL,
     ).strip()
+    api_base = ""
+    api_key_env = DEFAULT_API_KEY_ENV
+    if provider in {"api", "openai-compatible"}:
+        api_base = Prompt.ask(
+            "[bold]API base URL[/] [dim](OpenAI-compatible endpoint)[/]",
+            default=DEFAULT_API_BASE or "https://api.openai.com",
+        ).strip()
+        api_key_env = Prompt.ask(
+            "[bold]API key env var[/] [dim](name of the env var holding your key)[/]",
+            default=DEFAULT_API_KEY_ENV,
+        ).strip() or DEFAULT_API_KEY_ENV
     profile = Prompt.ask(
         "[bold]Scan profile[/]",
         choices=["quick", "standard", "deep"],
@@ -6414,7 +6561,7 @@ def interactive_startup() -> Tuple[str, str, str, bool, str, str, str]:
         "[bold]Resume from checkpoint if available?[/]", default=True
     )
     console.print()
-    return target, profile, mode, fresh, task, model, autonomy
+    return target, profile, mode, fresh, task, model, autonomy, provider, api_base, api_key_env
 
 
 # ═══════════════════════════════════════════════════════════
@@ -6429,6 +6576,9 @@ if __name__ == "__main__":
     _task = ""
     _model = DEFAULT_MODEL
     _autonomy = "free"
+    _provider = DEFAULT_PROVIDER
+    _api_base = DEFAULT_API_BASE
+    _api_key_env = DEFAULT_API_KEY_ENV
     _args = sys.argv[1:]
     i = 0
     while i < len(_args):
@@ -6462,6 +6612,33 @@ if __name__ == "__main__":
         elif arg.startswith("--autonomy="):
             _autonomy = arg.split("=", 1)[1]
             _cli = True
+        elif arg == "--provider" and i + 1 < len(_args):
+            _provider = _args[i + 1]
+            _cli = True
+            i += 1
+        elif arg.startswith("--provider="):
+            _provider = arg.split("=", 1)[1]
+            _cli = True
+        elif arg in {"--local", "--ollama"}:
+            _provider = "ollama"
+            _cli = True
+        elif arg in {"--api", "--openai-compatible"}:
+            _provider = "openai-compatible"
+            _cli = True
+        elif arg == "--api-base" and i + 1 < len(_args):
+            _api_base = _args[i + 1]
+            _cli = True
+            i += 1
+        elif arg.startswith("--api-base="):
+            _api_base = arg.split("=", 1)[1]
+            _cli = True
+        elif arg == "--api-key-env" and i + 1 < len(_args):
+            _api_key_env = _args[i + 1]
+            _cli = True
+            i += 1
+        elif arg.startswith("--api-key-env="):
+            _api_key_env = arg.split("=", 1)[1]
+            _cli = True
         elif arg in {"--task", "--mission", "--objective"} and i + 1 < len(_args):
             _task = _args[i + 1]
             _cli = True
@@ -6476,7 +6653,7 @@ if __name__ == "__main__":
 
     if not _cli:
         # Interactive mode
-        _domain, _profile, _mode, _fresh, _task, _model, _autonomy = interactive_startup()
+        _domain, _profile, _mode, _fresh, _task, _model, _autonomy, _provider, _api_base, _api_key_env = interactive_startup()
         p = SCAN_PROFILES.get(_profile, SCAN_PROFILES["standard"])
         MAX_STEPS = p["max_steps"]
         BOOTSTRAP_BATCH = p["batch"]
@@ -6484,13 +6661,47 @@ if __name__ == "__main__":
     run_agent._mode = _mode  # type: ignore
     run_agent._task = _task  # type: ignore
     run_agent._autonomy = _autonomy  # type: ignore
+    run_agent._provider = _provider  # type: ignore
+    run_agent._api_base = _api_base  # type: ignore
+    run_agent._api_key_env = _api_key_env  # type: ignore
     MODEL = _model.strip() or DEFAULT_MODEL
+    MODEL_PROVIDER = _provider.strip().lower() or DEFAULT_PROVIDER
+    MODEL_API_BASE = _api_base.strip()
+    MODEL_API_KEY_ENV = _api_key_env.strip() or DEFAULT_API_KEY_ENV
     print(f"[bootstrap] Selected model: {MODEL}")
-    _OL_OK, _OL_MSG = _bootstrap_ollama(MODEL)
-    if not _OL_OK:
-        print(f"[FATAL] Ollama: {_OL_MSG}")
-        sys.exit(1)
+    if _provider.strip().lower() in {"ollama", "local"}:
+        if importlib.util.find_spec("ollama") is None:
+            print("[bootstrap] Installing ollama Python client …")
+            _pip_install("ollama")
+        _OL_OK, _OL_MSG = _bootstrap_ollama(MODEL)
+        if not _OL_OK:
+            print(f"[FATAL] Ollama: {_OL_MSG}")
+            sys.exit(1)
+    _configure_llm_backend(
+        _provider,
+        MODEL,
+        api_base=_api_base,
+        api_key_env=_api_key_env,
+    )
     if _mode == "network":
-        run_agent(_domain, resume=not _fresh, fresh=_fresh, operator_task=_task, autonomy_mode=_autonomy)
+        run_agent(
+            _domain,
+            resume=not _fresh,
+            fresh=_fresh,
+            operator_task=_task,
+            autonomy_mode=_autonomy,
+            llm_provider=_provider,
+            llm_base_url=_api_base,
+            llm_api_key_env=_api_key_env,
+        )
     else:
-        run_agent(_domain, resume=not _fresh, fresh=_fresh, operator_task=_task, autonomy_mode=_autonomy)
+        run_agent(
+            _domain,
+            resume=not _fresh,
+            fresh=_fresh,
+            operator_task=_task,
+            autonomy_mode=_autonomy,
+            llm_provider=_provider,
+            llm_base_url=_api_base,
+            llm_api_key_env=_api_key_env,
+        )
