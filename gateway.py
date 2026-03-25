@@ -24,10 +24,20 @@ class PentGateway:
 
     def snapshot(self) -> Dict[str, Any]:
         data = self.workspace.describe()
+        if not isinstance(data, dict):
+            data = {}
         runtime = data.get("runtime", {})
+        if not isinstance(runtime, dict):
+            runtime = {}
         runtime.setdefault("backend", f"{runtime.get('provider', 'ollama')}:{runtime.get('model', 'unset')}")
+        runtime.setdefault("backend_provider", runtime.get("provider", "ollama"))
+        runtime.setdefault("backend_model", runtime.get("model", "unset"))
+        runtime.setdefault("model_verified", runtime.get("backend_model") == runtime.get("model"))
         data["runtime"] = runtime
-        data["workspace"] = data.get("workspace", {})
+        workspace = data.get("workspace", {})
+        if not isinstance(workspace, dict):
+            workspace = {}
+        data["workspace"] = workspace
         data["skills"] = skill_snapshot(self.skill_catalog)
         data["skill_details"] = [asdict(skill) for skill in self.skill_catalog.values()]
         data["launch"] = {

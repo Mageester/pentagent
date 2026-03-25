@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+from llm_backends import DEFAULT_OLLAMA_MODEL
+
 
 DEFAULT_AGENT_ID = "main"
 DEFAULT_DASHBOARD_PORT = 8765
@@ -55,7 +57,9 @@ def _now_iso() -> str:
 
 
 _DEFAULT_DOCS: Dict[str, str] = {
-    "AGENTS.md": """# PentAgent Workspace
+    "AGENTS.md": """# PentAgent Workspace (Deprecated)
+
+This workspace template is archived and no longer actively developed.
 
 This workspace is the local control plane for the agent runtime.
 
@@ -79,6 +83,8 @@ This workspace is the local control plane for the agent runtime.
 """,
     "SOUL.md": """# SOUL
 
+Deprecated: this platform template is preserved for reference only.
+
 Local-first. Evidence-driven. Operator-directed.
 
 The platform should behave like a serious authorized assessment console:
@@ -91,6 +97,8 @@ The platform should behave like a serious authorized assessment console:
 The pentest engine remains a dedicated capability pack, not the whole product.
 """,
     "TOOLS.md": """# Tools
+
+Deprecated: the bundled tooling guidance is archival only.
 
 The runtime is skill-driven.
 
@@ -110,6 +118,8 @@ The runtime is skill-driven.
 - Let the agent pivot from evidence rather than repeating the same probe.
 """,
     "BOOTSTRAP.md": """# Bootstrap
+
+Deprecated: this bootstrap guide is preserved for reference.
 
 1. Select a provider and model.
 2. Choose a workspace agent profile.
@@ -179,7 +189,12 @@ class PentWorkspace:
         return {
             "agent_id": self.agent_id,
             "provider": "ollama",
-            "model": "qwen3-coder:30b",
+            "model": DEFAULT_OLLAMA_MODEL,
+            "backend_provider": "ollama",
+            "backend_model": DEFAULT_OLLAMA_MODEL,
+            "backend_base_url": "",
+            "backend_api_key_env": "OPENAI_API_KEY",
+            "model_verified": True,
             "autonomy": "free",
             "mission": "",
             "mode": "launcher",
@@ -197,6 +212,19 @@ class PentWorkspace:
         runtime.update(_json_read(self.config_path, {}))
         runtime["agent_id"] = self.agent_id
         runtime["dashboard_port"] = self.dashboard_port
+        provider = str(runtime.get("provider", "")).strip() or "ollama"
+        model = str(runtime.get("model", "")).strip()
+        backend_provider = str(runtime.get("backend_provider", "")).strip() or provider
+        backend_model = str(runtime.get("backend_model", "")).strip()
+        if not model or model.lower() == "unset":
+            model = self.default_runtime()["model"]
+        if not backend_model or backend_model.lower() == "unset":
+            backend_model = model
+        runtime["provider"] = provider
+        runtime["model"] = model
+        runtime["backend_provider"] = backend_provider
+        runtime["backend_model"] = backend_model
+        runtime["model_verified"] = bool(model) and backend_model == model
         return runtime
 
     def save_runtime(self, data: Dict[str, Any]) -> None:
@@ -214,6 +242,9 @@ class PentWorkspace:
 
     def checkpoint_path(self) -> Path:
         return self.state_dir / "checkpoint.json"
+
+    def kernel_history_path(self) -> Path:
+        return self.state_dir / "kernel_history.jsonl"
 
     def report_paths(self) -> Dict[str, str]:
         return {
@@ -242,6 +273,7 @@ class PentWorkspace:
             "config_path": str(self.config_path),
             "runtime_path": str(self.runtime_path),
             "checkpoint_path": str(self.checkpoint_path()),
+            "kernel_history_path": str(self.kernel_history_path()),
             "dashboard_port": self.dashboard_port,
             "docs": docs,
             "skill_dirs": [str(p) for p in self.skill_directories()],
@@ -277,8 +309,10 @@ class PentWorkspace:
         )
         sessions: List[Dict[str, Any]] = []
         for path in manifests[:limit]:
+            if path.name == self.session_index_path.name:
+                continue
             data = _json_read(path, {})
-            if data:
+            if isinstance(data, dict) and data:
                 data.setdefault("path", str(path))
                 sessions.append(data)
         return sessions

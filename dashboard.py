@@ -57,8 +57,12 @@ def render_dashboard(snapshot: Dict[str, Any]) -> str:
     mode = runtime.get("mode") or checkpoint.get("mode") or "launcher"
     provider = runtime.get("provider") or "ollama"
     model = runtime.get("model") or "unset"
+    backend_model = runtime.get("backend_model") or model
+    has_model = bool(str(model).strip()) and str(model).strip().lower() != "unset"
+    model_verified = bool(runtime.get("model_verified", backend_model == model)) if has_model else False
     autonomy = runtime.get("autonomy") or checkpoint.get("autonomy_mode") or "free"
     backend = runtime.get("backend") or provider
+    verification = "verified" if model_verified else ("unconfigured" if not has_model else "mismatch")
 
     findings = checkpoint.get("findings", []) or []
     notes = checkpoint.get("notes", []) or []
@@ -107,11 +111,20 @@ def render_dashboard(snapshot: Dict[str, Any]) -> str:
 
     docs = workspace.get("docs", {})
     doc_rows = [[name, "present" if present else "missing"] for name, present in docs.items()]
+    state_signature = (
+        f"{checkpoint.get('step', 0)}:"
+        f"{len(checkpoint.get('recent_events', []) or [])}:"
+        f"{len(findings)}:"
+        f"{len(notes)}:"
+        f"{runtime.get('updated_at', '')}:"
+        f"{runtime.get('model', '')}:"
+        f"{runtime.get('backend_model', '')}"
+    )
 
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="5">
+<meta http-equiv="refresh" content="60">
 <title>PentAgent Control Plane</title>
 <style>
 :root{{color-scheme:dark;--bg:#07111f;--bg2:#0d1730;--panel:rgba(11,21,40,.86);--border:rgba(132,164,255,.18);--text:#e7efff;--muted:#8fa4cc;--accent:#68f0c4;--accent2:#6da8ff;--radius:22px;--radius-sm:16px;--mono:"Cascadia Mono","SFMono-Regular",Consolas,monospace;--sans:"Segoe UI Variable","Segoe UI","Aptos",system-ui,sans-serif;}}
@@ -136,17 +149,34 @@ input,select,textarea,button{{font:inherit}} input,select,textarea{{width:100%;p
 .actions{{display:flex;gap:12px;flex-wrap:wrap}} .footer{{margin-top:18px;color:var(--muted);font-size:.9rem;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}} pre{{margin:0;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:var(--mono);font-size:.82rem;line-height:1.5;color:#d6e3ff}}
 @media(max-width:1100px){{.hero,.split,.grid{{grid-template-columns:1fr}}}}
 </style></head><body><div class="shell">
-<div class="top"><div class="brand"><div class="logo">PA</div><div><div class="eyebrow">Local-first control plane</div><h1>PentAgent Dashboard</h1><p class="sub">Workspace, skills, sessions, and artifacts stay local. Use the browser form to change defaults and the CLI to launch a target.</p></div></div><div class="stack">{_pill("provider", provider)}{_pill("model", model)}{_pill("backend", backend)}</div></div>
-<div class="hero"><section class="panel hero-main"><div><div class="eyebrow">Current mission</div><h1>{_esc(mission)}</h1><p class="sub">The pentest engine runs as one skill pack inside a broader local platform. The dashboard reads the workspace and checkpoint files and refreshes automatically.</p></div><div class="stack">{_pill("target", target)}{_pill("mode", mode)}{_pill("autonomy", autonomy)}{_pill("workspace", workspace.get("agent_id", "main"))}</div></section>
-<aside class="card stats"><div class="eyebrow">Launch Defaults</div><form class="form" method="post" action="/api/config"><div class="grid"><label>Provider<select name="provider"><option value="ollama" {"selected" if provider == "ollama" else ""}>ollama</option><option value="openai-compatible" {"selected" if provider in {"openai-compatible", "api"} else ""}>openai-compatible</option></select></label><label>Model<input name="model" value="{_esc(model)}" placeholder="qwen3-coder:30b"></label><label>Autonomy<select name="autonomy"><option value="free" {"selected" if autonomy == "free" else ""}>free</option><option value="balanced" {"selected" if autonomy == "balanced" else ""}>balanced</option></select></label><label>Mode<select name="mode"><option value="launcher" {"selected" if mode == "launcher" else ""}>launcher</option><option value="web" {"selected" if mode == "web" else ""}>web</option><option value="network" {"selected" if mode == "network" else ""}>network</option></select></label></div><label>Mission<textarea name="mission" placeholder="Describe the broad authorized objective">{_esc(runtime.get("mission", ""))}</textarea></label><label>Target / subnet<input name="target" value="{_esc(runtime.get("target", ""))}" placeholder="http://localhost:3000 or 10.0.0.0/24"></label><div class="actions"><button type="submit">Save workspace defaults</button><a class="btn" href="/api/state">JSON state</a></div></form></aside></div>
-<section class="panel"><div class="head"><div><h2>Runtime</h2><p>Current session and workspace state from the checkpoint.</p></div></div><div class="grid"><article class="card stats"><div class="eyebrow">Progress</div><div class="value">Step {checkpoint.get("step", 0)}</div><div class="note">{len(checkpoint.get("pages", {}) or [])} pages | {len(checkpoint.get("network_hosts", []) or [])} hosts | {len(checkpoint.get("queued_urls", []) or [])} queued URLs</div></article><article class="card stats"><div class="eyebrow">Findings</div><div class="value">{len(findings)}</div><div class="note">{len(skills.get("categories", {}) or {})} skill categories | {skills.get("total", 0)} loaded skills</div></article><article class="card stats"><div class="eyebrow">Workspace</div><div class="value">{workspace.get("agent_id", "main")}</div><div class="note">{workspace.get("artifacts_dir", "")}</div></article></div></section>
+<div class="top"><div class="brand"><div class="logo">PA</div><div><div class="eyebrow">Deprecated control plane</div><h1>PentAgent Dashboard</h1><p class="sub">This project is archived and no longer actively developed. Workspace, skills, sessions, and artifacts remain local for reference only.</p></div></div><div class="stack">{_pill("provider", provider)}{_pill("model", model)}{_pill("backend", backend)}{_pill("model check", verification)}</div></div>
+<div class="hero"><section class="panel hero-main"><div><div class="eyebrow">Current mission</div><h1>{_esc(mission)}</h1><p class="sub">The pentest engine runs as one skill pack inside a broader local platform. The dashboard reads the workspace and checkpoint files and refreshes automatically.</p></div><div class="stack">{_pill("target", target)}{_pill("mode", mode)}{_pill("autonomy", autonomy)}{_pill("workspace", workspace.get("agent_id", "main"))}{_pill("verified", verification)}</div></section>
+    <aside class="card stats"><div class="eyebrow">Launch Defaults</div><form class="form" method="post" action="/api/config"><div class="grid"><label>Provider<select name="provider"><option value="ollama" {"selected" if provider == "ollama" else ""}>ollama</option><option value="openai-compatible" {"selected" if provider in {"openai-compatible", "api"} else ""}>openai-compatible</option></select></label><label>Model<input name="model" value="{_esc(model)}" placeholder="Exact Ollama model tag"></label><label>Autonomy<select name="autonomy"><option value="free" {"selected" if autonomy == "free" else ""}>free</option><option value="balanced" {"selected" if autonomy == "balanced" else ""}>balanced</option></select></label><label>Mode<select name="mode"><option value="launcher" {"selected" if mode == "launcher" else ""}>launcher</option><option value="web" {"selected" if mode == "web" else ""}>web</option><option value="network" {"selected" if mode == "network" else ""}>network</option></select></label></div><label>Mission<textarea name="mission" placeholder="Describe the broad authorized objective">{_esc(runtime.get("mission", ""))}</textarea></label><label>Target / subnet<input name="target" value="{_esc(runtime.get("target", ""))}" placeholder="http://localhost:3000 or 10.0.0.0/24"></label><div class="actions"><button type="submit">Save workspace defaults</button><a class="btn" href="/api/state">JSON state</a></div></form></aside></div>
+<section class="panel"><div class="head"><div><h2>Runtime</h2><p>Current session and workspace state from the checkpoint.</p></div></div><div class="grid"><article class="card stats"><div class="eyebrow">Progress</div><div class="value">Step {checkpoint.get("step", 0)}</div><div class="note">{len(checkpoint.get("pages", {}) or [])} pages | {len(checkpoint.get("network_hosts", []) or [])} hosts | {len(checkpoint.get("queued_urls", []) or [])} queued URLs</div></article><article class="card stats"><div class="eyebrow">Findings</div><div class="value">{len(findings)}</div><div class="note">{len(skills.get("categories", {}) or {})} skill categories | {skills.get("total", 0)} loaded skills</div></article><article class="card stats"><div class="eyebrow">Workspace</div><div class="value">{workspace.get("agent_id", "main")}</div><div class="note">{workspace.get("artifacts_dir", "")}</div></article><article class="card stats"><div class="eyebrow">Model</div><div class="value">{_esc(runtime.get("model", "unset"))}</div><div class="note">{_esc(runtime.get("backend_model", runtime.get("model", "unset")))} | {("verified" if model_verified else "mismatch")}</div></article></div></section>
 <section class="panel"><div class="head"><div><h2>Workspace</h2><p>Bootstrap docs and local storage paths.</p></div></div><div class="split"><div class="inset">{_kv({"root": workspace.get("root", ""), "state_dir": workspace.get("state_dir", ""), "artifacts_dir": workspace.get("artifacts_dir", ""), "sessions_dir": workspace.get("sessions_dir", ""), "skills_dir": workspace.get("skills_dir", ""), "config_path": workspace.get("config_path", ""), "checkpoint": workspace.get("checkpoint_path", ""), "dashboard": f"http://127.0.0.1:{workspace.get('dashboard_port', 8765)}"})}</div><div class="inset"><div class="eyebrow">Docs</div>{_kv(docs)}<div class="eyebrow" style="margin-top:1rem;">Skill Roots</div><div class="stack">{''.join(f'<span class="btn">{_esc(p)}</span>' for p in workspace.get("skill_dirs", []))}</div></div></div></section>
 <section class="panel"><div class="head"><div><h2>Skills</h2><p>File-based packs plus built-in tool descriptors.</p></div></div><div class="split"><div class="inset"><div class="eyebrow">Catalog</div><div class="stack">{_pill("total", skills.get("total", 0))}{_pill("sources", len(skills.get("sources", {}) or {}))}{_pill("categories", len(skills.get("categories", {}) or {}))}</div><div class="eyebrow" style="margin-top:1rem;">Samples</div>{_kv({k: ', '.join(v[:5]) for k, v in (skills.get("samples", {}) or {}).items()})}</div><div class="inset"><ul class="list">{''.join(f'<li><span>{_esc(s.get("name", ""))}</span><small>{_esc(s.get("category", ""))} | { _esc(s.get("kind", "")) } | {_esc(s.get("source", ""))}</small><small>{_esc(s.get("description", ""))}</small></li>' for s in skill_details[:12]) or '<li class="empty">No file-based skill packs discovered yet</li>'}</ul></div></div></section>
 <section class="panel"><div class="head"><div><h2>Sessions</h2><p>Persisted workspace sessions.</p></div></div>{_table(["Session","Mode","Target","Goal","Updated"], session_rows)}</section>
 <section class="panel"><div class="head"><div><h2>Evidence</h2><p>Recent findings, notes, and report destinations.</p></div></div><div class="split"><div class="inset"><div class="eyebrow">Recent findings</div>{_table(["Severity","Kind","URL","Detail"], top_findings)}</div><div class="inset"><div class="eyebrow">Recent notes</div>{_table(["Note"], recent_notes)}</div></div><div class="inset" style="margin-top:14px"><div class="eyebrow">Report artifacts</div>{_kv(reports)}</div></section>
 <section class="panel"><div class="head"><div><h2>Live Trace</h2><p>Recent decisions, tool calls, and repeat handling from the current run.</p></div></div>{_table(["Step","Type","Source","Detail"], trace_rows)}</section>
 <section class="panel"><div class="head"><div><h2>Raw State</h2><p>Checkpoint JSON for deeper inspection.</p></div></div><details><summary>Open checkpoint JSON</summary><pre>{_esc(json.dumps(checkpoint, indent=2, ensure_ascii=False)[:12000])}</pre></details></section>
-<div class="footer"><span>Auto-refreshes every 5 seconds.</span><span>Workspace root: <code>{_esc(workspace.get("root", ""))}</code></span></div>
+<div class="footer"><span>Auto-refreshes when the checkpoint changes.</span><span>Workspace root: <code>{_esc(workspace.get("root", ""))}</code></span></div>
+<script>
+const __PENTAGENT_SIG__ = "{state_signature}";
+async function __pollPentAgent() {{
+  try {{
+    const response = await fetch("/api/state", {{ cache: "no-store" }});
+    if (!response.ok) return;
+    const state = await response.json();
+    const nextSig = `${{state?.checkpoint?.step || 0}}:${{(state?.checkpoint?.recent_events || []).length}}:${{(state?.checkpoint?.findings || []).length}}:${{(state?.checkpoint?.notes || []).length}}:${{state?.runtime?.updated_at || ""}}:${{state?.runtime?.model || ""}}:${{state?.runtime?.backend_model || ""}}`;
+    if (nextSig !== __PENTAGENT_SIG__) {{
+      window.location.reload();
+    }}
+  }} catch (error) {{
+    // Keep the existing page visible if polling fails.
+  }}
+}}
+setInterval(__pollPentAgent, 2000);
+</script>
 </div></body></html>"""
 
 

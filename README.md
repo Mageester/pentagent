@@ -1,10 +1,11 @@
-# PentAgent
+# PentAgent (Deprecated)
 
-**Local-first penetration testing platform for authorized environments.**
+**This repository is deprecated and no longer under active development.**
 
-PentAgent now behaves more like a control plane than a single scanner:
-a browser dashboard, a persistent workspace, loadable skill packs, and a
-pentest engine that runs as one capability inside the platform.
+PentAgent is preserved here for reference only. The codebase still shows the
+local-first control plane, persistent workspace, loadable skill packs, and the
+recursive kernel that were built during development, but it should be treated
+as archived software rather than a living project.
 
 ## Overview
 
@@ -13,6 +14,8 @@ authorized assessments. It keeps model selection, skills, workspace state,
 and reports on your machine, while still letting the pentest engine use
 Ollama locally or an OpenAI-compatible API backend when you want to offload
 compute.
+
+**Status:** deprecated / archival only.
 
 The platform is organized around a persistent workspace and browser
 dashboard. The dashboard reads the current checkpoint, skills, runtime
@@ -47,6 +50,8 @@ flowchart TD
   B --> E["Pentest Engine Skill Pack"]
   E --> F["Reports / Evidence"]
   B --> G["Browser Dashboard"]
+  B --> H["Adaptive Scripting Engine"]
+  B --> I["Connectivity Module"]
 ```
 
 ### Platform Layers
@@ -57,6 +62,9 @@ flowchart TD
 - `Skill Packs` are discovered from `SKILL.md` files and merged with built-in tools.
 - `Pentest Engine Skill Pack` is the existing autonomous assessment engine.
 - `Browser Dashboard` provides the OpenClaw-style control surface.
+- `Adaptive Scripting Engine` writes generated scripts under `scripts/` and executes them as reusable local automation units.
+- `Connectivity Module` manages explicit SSH/API access for approved remote systems when credentials are provided.
+- `Kernel / Recursive Loop` is the silent objective runner that persists shell history and executes code blocks.
 
 ## Key Capabilities
 
@@ -66,14 +74,17 @@ flowchart TD
 | Browser Control Plane | Local dashboard shows workspace state, skills, sessions, and runtime defaults |
 | Persistent Workspace | Config, sessions, and docs live under `workspace/agents/<agent_id>/` |
 | Loadable Skill Packs | Bundled `SKILL.md` packs are discovered from disk and merged with built-in tools |
-| Full Terminal Access | The agent can execute shell commands, WSL tools, and custom scripts |
+| Full Terminal Access | The agent can execute shell commands, WSL tools, `run_command`, `kali_shell`, and `wsl_shell` aliases |
 | Self-Bootstrapping | Auto-installs Python dependencies, Playwright, and can install security tools via winget or pip |
+| Environment Bootstrap | Checks approved host tools and auto-installs missing dependencies when a package manager is available |
 | 8 Built-In Security Checks | SSL/TLS, cookies, sensitive paths, CORS, mixed content, email security, info disclosure, security headers |
 | Web Crawling & Analysis | Full site mapping, metadata extraction, broken link detection, redirect chain analysis |
 | Browser Rendering | Playwright-based screenshots and JS-rendered DOM extraction |
 | Lighthouse Integration | Performance, accessibility, SEO, and best-practices scoring |
 | Persistent State | Checkpoint/resume support for interrupted assessments |
 | Attack-Graph Memory | Tracks discovered surfaces, findings, confidence, and pivots across the run |
+| Adaptive Scripting Engine | Writes generated Python/Bash scripts into `scripts/` and executes them as reusable local task files |
+| Multi-Node Connectivity | Uses explicit SSH/API credentials from `connectivity.json` for approved remote systems |
 | Operator Mission Setting | Set a broad custom mission and let the agent choose the best authorized pivots |
 | Model Selection at Startup | Pick the Ollama tag you want, and the agent auto-pulls it if it is missing |
 | Provider Selection at Startup | Run a local Ollama backend or an OpenAI-compatible API backend |
@@ -93,7 +104,7 @@ flowchart TD
 - Node.js, optional, for Lighthouse
 - nmap, optional, for native host/service scanning
 
-### Quick Start
+### Legacy Quick Start (Archived)
 
 ```powershell
 git clone https://github.com/youruser/pentagent.git
@@ -105,6 +116,8 @@ python agent.py
 
 The script auto-installs all Python dependencies on first run.
 
+These commands are preserved for archival reference only.
+
 ### Model Setup
 
 ```powershell
@@ -112,12 +125,14 @@ ollama serve
 ollama pull qwen3-coder:30b
 ```
 
-Recommended default for strongest reasoning is `qwen3-coder:30b`, but you
-can choose any Ollama model tag at startup or with `--model`.
+The archived launcher now resolves the installed 30B HF tag automatically,
+but you can still override the Ollama model tag when using the lower-level
+`vanguard_core.py` entrypoint.
 
-The agent auto-pulls the selected model if it is missing.
-This only applies when you choose the local `ollama`/`local` provider;
-API-backed runs do not require Ollama on the host.
+The archived runtime can auto-resolve the selected model if the shorthand
+alias is missing. This only applies when you choose the local
+`ollama`/`local` provider; API-backed runs do not require Ollama on the
+host.
 
 If you want to offload reasoning later, choose the API-compatible provider
 at startup or launch with `--provider api` and point it at an
@@ -125,7 +140,10 @@ OpenAI-compatible endpoint.
 
 ## Usage
 
-### Interactive Mode
+The usage examples below are archived reference material. This repository is
+deprecated and no longer actively developed.
+
+### Legacy Interactive Mode (Archived)
 
 ```powershell
 python agent.py
@@ -142,7 +160,7 @@ Interactive launch presents:
 
 The dashboard starts automatically and stays in sync with the workspace.
 
-### CLI Mode
+### Legacy CLI Mode (Archived)
 
 ```powershell
 python agent.py http://localhost:3000 --mission "find auth bypass and IDOR"
@@ -161,6 +179,58 @@ Useful flags:
 - `--provider ollama` or `--provider api`
 - `--api-base` and `--api-key-env` for OpenAI-compatible backends
 
+### Kernel Mode (Archived)
+
+For a general recursive terminal agent, launch the new kernel loop:
+
+```powershell
+python agent.py kernel --objective "reorganize my project, inspect errors, and fix them recursively"
+```
+
+Kernel mode keeps a persistent shell/history transcript, executes bash or
+python code blocks from the model, and stays in a silent command/result
+console loop until the model emits `[TASK_COMPLETE]`.
+
+### VanguardCore (Archived)
+
+If you want the exact objective-loop engine requested in the API-facing
+design, launch `vanguard_core.py` directly:
+
+```powershell
+python vanguard_core.py --objective "organize my local environment and fix issues recursively"
+```
+
+VanguardCore uses a persistent conversation history, parses bash/python code
+blocks from the model, executes them immediately with `subprocess.run`, and
+continues until the model emits `[OBJECTIVE_MET]`.
+
+On startup VanguardCore also checks for a hidden root-level
+`.vanguard_journal.json` file. If it exists, the engine restores the prior
+session objective, session ID, and recent unified context automatically so
+the next run continues where the previous one left off. Use `--fresh` to
+ignore the journal and begin a brand-new session.
+
+### Ignite Launcher (Archived)
+
+For a clean, operator-facing start that clears the screen, resets the hidden
+journal, and routes assistant chatter to a background log while keeping the
+raw execution stream visible, use `ignite.py`:
+
+```powershell
+python ignite.py "organize my local environment and fix issues recursively"
+```
+
+The assistant log is written under `workspace/agents/main/artifacts/`.
+At startup the launcher also moves legacy instruction-style files into
+`backup/legacy/` so the active workspace stays focused on the current
+session log and generated scripts.
+
+If you prefer a standardized wrapper, `main.py` is an equivalent entrypoint:
+
+```powershell
+python main.py "organize my local environment and fix issues recursively"
+```
+
 ## Runtime Notes
 
 - `web` mode is for domains and URLs; `network` mode is for CIDRs or `auto`.
@@ -170,8 +240,14 @@ Useful flags:
   pivot instead of dying on a missing binary.
 - Lighthouse is optional and depends on a Chromium-capable browser being
   available on the host.
+- The browser dashboard polls live checkpoint state and shows an explicit
+  model verification badge so you can confirm the backend is using the model
+  tag you requested.
 - `free` autonomy mode removes the mission-specific kickoff steps and lets
   the model decide the path from live evidence.
+- `scripts/` is created automatically for generated Python/Bash utilities.
+- `connectivity.json` can define explicit SSH and API targets when you want
+  to manage other approved systems with supplied credentials.
 
 ## Workspace Layout
 

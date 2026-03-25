@@ -271,6 +271,7 @@ from security_tools import (  # type: ignore
     check_info_disclosure, check_security_headers_deep,
 )
 from llm_backends import build_backend, describe_backend  # type: ignore
+from kernel import Kernel, run_code_blocks  # type: ignore
 from workspace import PentWorkspace  # type: ignore
 from gateway import PentGateway  # type: ignore
 from skill_registry import (  # type: ignore
@@ -321,6 +322,8 @@ PLAYWRIGHT_AVAILABLE = (_PW_STATUS == "ok")
 
 for _d in [OUTPUT_DIR, SCREENSHOTS_DIR, LIGHTHOUSE_DIR, SCAN_LOGS_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
+
+KERNEL: Optional[Kernel] = Kernel(WORKSPACE.kernel_history_path())
 
 # ═══════════════════════════════════════════════════════════
 #  SHARED CLIENTS
@@ -402,6 +405,7 @@ def ui_banner(domain: str, profile: str = "standard") -> None:
         f"[dim]Target:[/]   [bold bright_white]{domain}[/]",
         f"[dim]Model:[/]    [bold]{MODEL}[/]",
         f"[dim]Provider:[/] [bold]{MODEL_PROVIDER}[/] [dim]({compact_text(backend_text, 52)})[/]",
+        f"[dim]Check:[/]    [bold]{_model_verification_text()}[/]",
         f"[dim]Profile:[/]  [bold]{profile}[/]",
         f"[dim]Workspace:[/] [bold]{WORKSPACE.agent_id}[/] [dim]({compact_text(str(WORKSPACE.root), 52)})[/]",
     ]
@@ -505,6 +509,19 @@ def _latest_decision_text(state: "AgentState") -> str:
     return ""
 
 
+def _model_verification_text() -> str:
+    backend_info = getattr(llm, "info", None)
+    if backend_info is None:
+        return "unverified"
+    requested = MODEL
+    actual = getattr(backend_info, "model", requested) or requested
+    provider = getattr(backend_info, "provider", MODEL_PROVIDER) or MODEL_PROVIDER
+    if not str(requested).strip() or str(requested).strip().lower() == "unset":
+        return f"unconfigured ({provider}:{actual})"
+    verdict = "verified" if actual == requested else "mismatch"
+    return f"{verdict} ({provider}:{actual})"
+
+
 def _queue_preview(state: "AgentState", limit: int = 4) -> str:
     if not state.queued_urls:
         return ""
@@ -554,6 +571,7 @@ def ui_dashboard(state: "AgentState") -> None:
         )
         grid.add_row(
             f"[dim]Provider[/]  {provider_text}",
+            f"[dim]Model check[/]  {_model_verification_text()}",
             f"[dim]Skills[/]  {len(SKILL_CATALOG)}",
             f"[dim]Categories[/]  {len(SKILL_COUNTS)}",
             f"[dim]Graph[/]  {graph_summary['nodes']}n/{graph_summary['edges']}e",
@@ -596,6 +614,7 @@ def ui_dashboard(state: "AgentState") -> None:
         )
         grid.add_row(
             f"[dim]Provider[/]  {provider_text}",
+            f"[dim]Model check[/]  {_model_verification_text()}",
             f"[dim]Skills[/]  {len(SKILL_CATALOG)}",
             f"[dim]Categories[/]  {len(SKILL_COUNTS)}",
             f"[dim]Tool health[/]  {compact_text(tool_health_text, 88)}",
@@ -882,7 +901,22 @@ def normalize_url(url: str) -> str:
     return out
 
 
+def _is_internal_control_plane_url(url: str) -> bool:
+    try:
+        parsed = urlparse(normalize_url(url))
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    if host not in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    workspace_port = getattr(globals().get("WORKSPACE", None), "dashboard_port", 8765)
+    return port == workspace_port
+
+
 def same_domain(url: str, domain: str) -> bool:
+    if _is_internal_control_plane_url(url):
+        return False
     host = (urlparse(url).hostname or "").lower()
     if STATE is not None and STATE.mode == "network":
         return _network_host_in_scope(host)
@@ -1375,6 +1409,51 @@ def _tool_result_text(result: ToolResult) -> str:
     return "\n".join(chunks)
 
 
+def _record_kernel_shell_history(
+    command: str,
+    stdout_text: str,
+    stderr_text: str,
+    returncode: int,
+    *,
+    cwd: str = "",
+) -> None:
+    if KERNEL is None:
+        return
+    try:
+        KERNEL.record_command(
+            command,
+            language="shell",
+            cwd=cwd,
+            metadata={"source": "tool_run_command"},
+        )
+        for line in (stdout_text or "").splitlines():
+            KERNEL.record_stream_line(
+                command,
+                "stdout",
+                line,
+                cwd=cwd,
+                metadata={"source": "tool_run_command"},
+            )
+        for line in (stderr_text or "").splitlines():
+            KERNEL.record_stream_line(
+                command,
+                "stderr",
+                line,
+                cwd=cwd,
+                metadata={"source": "tool_run_command"},
+            )
+        KERNEL.record_result(
+            command,
+            returncode,
+            cwd=cwd,
+            stdout=stdout_text,
+            stderr=stderr_text,
+            metadata={"source": "tool_run_command"},
+        )
+    except Exception:
+        pass
+
+
 _OBJECT_REFERENCE_PARAM_NAMES = {
     "id", "uid", "user", "user_id", "userid", "account", "account_id",
     "order", "order_id", "product", "product_id", "item", "item_id",
@@ -1715,6 +1794,8 @@ def tool_check_broken_links(sample_limit: int = 80) -> ToolResult:
     assert STATE is not None
     checked, broken = 0, []
     for page_url, pg in list(STATE.pages.items())[:120]:
+        if _is_internal_control_plane_url(page_url):
+            continue
         for link in pg.get("internal_links", []) + pg.get("external_links", []):
             if checked >= sample_limit:
                 break
@@ -1805,6 +1886,8 @@ def tool_site_map(target: str = "", include_queue: bool = True,
                   max_pages: int = 50) -> ToolResult:
     assert STATE is not None
     seed = normalize_url(target or STATE.start_url or _state_origin_url())
+    if _is_internal_control_plane_url(seed):
+        return ToolResult(ok=False, output="", error=f"Internal control plane is not target scope: {seed}")
     seed_note = ""
     seed_result: Optional[ToolResult] = None
 
@@ -1868,6 +1951,8 @@ def tool_playwright_screenshot(url: str) -> ToolResult:
                           error="Playwright not available")
     assert STATE is not None
     url = normalize_url(url)
+    if _is_internal_control_plane_url(url):
+        return ToolResult(ok=False, output="", error=f"Internal control plane is not target scope: {url}")
     page = None
     try:
         browser = _get_browser()
@@ -1915,6 +2000,8 @@ def tool_playwright_extract(url: str) -> ToolResult:
                           error="Playwright not available")
     assert STATE is not None
     url = normalize_url(url)
+    if _is_internal_control_plane_url(url):
+        return ToolResult(ok=False, output="", error=f"Internal control plane is not target scope: {url}")
     page = None
     try:
         browser = _get_browser()
@@ -1947,6 +2034,8 @@ def tool_playwright_extract(url: str) -> ToolResult:
 def tool_playwright(url: str = "", mode: str = "extract") -> ToolResult:
     assert STATE is not None
     target = url or STATE.start_url
+    if _is_internal_control_plane_url(target):
+        return ToolResult(ok=False, output="", error=f"Internal control plane is not target scope: {target}")
     mode_l = (mode or "extract").strip().lower()
     if mode_l in {"screenshot", "shot", "image"}:
         return tool_playwright_screenshot(target)
@@ -1957,6 +2046,8 @@ def tool_lighthouse_audit(url: str) -> ToolResult:
     global LIGHTHOUSE_AVAILABLE
     assert STATE is not None
     url = normalize_url(url)
+    if _is_internal_control_plane_url(url):
+        return ToolResult(ok=False, output="", error=f"Internal control plane is not target scope: {url}")
     slug = _url_to_slug(url)
     out_path = LIGHTHOUSE_DIR / f"{slug}.json"
     page = STATE.pages.get(url, {})
@@ -2544,6 +2635,13 @@ def tool_run_command(command: str, timeout: int = 120) -> ToolResult:
                 f"$ {command}\n\n--- stdout ---\n{stdout_text}"
                 f"\n--- stderr ---\n{stderr_text}\n"
             )
+        _record_kernel_shell_history(
+            command,
+            stdout_text,
+            stderr_text,
+            r.returncode,
+            cwd=str(OUTPUT_DIR),
+        )
         return ToolResult(ok=r.returncode == 0, output=json.dumps({
             "command": command, "returncode": r.returncode,
             "stdout": stdout, "stderr": stderr, "log": str(log_path),
@@ -2559,6 +2657,13 @@ def tool_run_command(command: str, timeout: int = 120) -> ToolResult:
                 )
         except Exception:
             pass
+        _record_kernel_shell_history(
+            command,
+            stdout_text,
+            stderr_text,
+            None,
+            cwd=str(OUTPUT_DIR),
+        )
         return ToolResult(ok=False, output=json.dumps({
             "command": command,
             "returncode": None,
@@ -2569,6 +2674,13 @@ def tool_run_command(command: str, timeout: int = 120) -> ToolResult:
             "timeout_s": timeout,
         }, indent=2), error=f"Timed out ({timeout}s)")
     except Exception as e:
+        _record_kernel_shell_history(
+            command,
+            "",
+            str(e),
+            None,
+            cwd=str(OUTPUT_DIR),
+        )
         return ToolResult(ok=False, output="", error=str(e))
 
 
@@ -3867,6 +3979,8 @@ def tool_security_ssl() -> ToolResult:
 def tool_security_cookies(url: str = "") -> ToolResult:
     assert STATE is not None
     url = url or STATE.start_url
+    if _is_internal_control_plane_url(url):
+        return ToolResult(ok=False, output="", error=f"Internal control plane is not target scope: {url}")
     return _wrap_security(check_cookies(url, http), "cookies", url)
 
 
@@ -3882,6 +3996,8 @@ def tool_security_sensitive_paths() -> ToolResult:
 def tool_security_cors(url: str = "") -> ToolResult:
     assert STATE is not None
     url = url or STATE.start_url
+    if _is_internal_control_plane_url(url):
+        return ToolResult(ok=False, output="", error=f"Internal control plane is not target scope: {url}")
     return _wrap_security(
         check_cors(url, STATE.domain, http, origin_base=_state_origin_url()),
         "cors",
@@ -3905,6 +4021,8 @@ def tool_security_email() -> ToolResult:
 def tool_security_info_disclosure(url: str = "") -> ToolResult:
     assert STATE is not None
     url = url or STATE.start_url
+    if _is_internal_control_plane_url(url):
+        return ToolResult(ok=False, output="", error=f"Internal control plane is not target scope: {url}")
     return _wrap_security(check_info_disclosure(url, STATE.domain, http),
                           "info_disclosure", url)
 
@@ -3912,6 +4030,8 @@ def tool_security_info_disclosure(url: str = "") -> ToolResult:
 def tool_security_headers_deep(url: str = "") -> ToolResult:
     assert STATE is not None
     url = url or STATE.start_url
+    if _is_internal_control_plane_url(url):
+        return ToolResult(ok=False, output="", error=f"Internal control plane is not target scope: {url}")
     return _wrap_security(check_security_headers_deep(url, http),
                           "security_headers", url)
 
@@ -3919,6 +4039,8 @@ def tool_security_headers_deep(url: str = "") -> ToolResult:
 def tool_attack_surface_review(page_url: str = "") -> ToolResult:
     assert STATE is not None
     url = normalize_url(page_url or STATE.start_url or _state_origin_url())
+    if _is_internal_control_plane_url(url):
+        return ToolResult(ok=False, output="", error=f"Internal control plane is not target scope: {url}")
     page = STATE.pages.get(url)
     if page is None and same_domain(url, STATE.domain):
         try:
@@ -5049,6 +5171,8 @@ TOOL_DESCRIPTIONS = {
     "site_map": "Snapshot of discovered site map and scan state. no args",
     "security-check": "Generic security check dispatcher. args: {target, checks}",
     "run_command": "Execute ANY shell command freely. args: {command, timeout}",
+    "kali_shell": "Alias of run_command with a Kali-centric label. args: {command, timeout}",
+    "wsl_shell": "Alias of run_command emphasizing direct WSL shell access. args: {command, timeout}",
     "install_tool": "Install a security tool (nmap,nuclei,sqlmap,etc). args: {tool_name}",
     "ask_user": "Ask the operator a question (for risky/unclear decisions). args: {question}",
     # Browser
@@ -5133,6 +5257,80 @@ def _extract_json(text: str) -> Dict[str, Any]:
     raise json.JSONDecodeError("No valid JSON", text, 0)
 
 
+def _parse_llm_decision_text(text: str) -> Optional[Dict[str, Any]]:
+    raw = _strip_think(text or "").strip()
+    if not raw:
+        return None
+
+    # First, try direct JSON extraction anywhere in the output.
+    try:
+        return _normalize_llm_decision(_extract_json(raw))
+    except json.JSONDecodeError:
+        pass
+
+    # Parse a compact directive-style response such as:
+    # action: tool
+    # tool: whatweb
+    # args: {"url":"..."}
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    kv: Dict[str, str] = {}
+    for line in lines:
+        m = re.match(r"^(action|tool|why|reason|summary|args?)\s*[:=]\s*(.+)$", line, re.I)
+        if m:
+            kv[m.group(1).lower()] = m.group(2).strip()
+
+    action = kv.get("action", "").lower()
+    if not action:
+        lowered = raw.lower()
+        if lowered.startswith("finish") or re.search(r"\bfinish\b", lowered):
+            action = "finish"
+        elif lowered.startswith("summarize") or lowered.startswith("summary") or re.search(r"\bsummarize\b", lowered):
+            action = "summarize"
+        elif kv.get("tool") or re.search(r"\b(tool|use|run|execute)\b", lowered):
+            action = "tool"
+
+    if action == "tool":
+        tool_name = _canonical_tool_name(kv.get("tool", ""))
+        if not tool_name:
+            known_tools = sorted(TOOL_DESCRIPTIONS.keys(), key=len, reverse=True)
+            for candidate in known_tools:
+                pattern = r"\b" + re.escape(candidate.replace("_", " ")) + r"\b"
+                if re.search(pattern, raw, re.I):
+                    tool_name = candidate
+                    break
+        if not tool_name:
+            return None
+        args: Dict[str, Any] = {}
+        args_text = kv.get("args", "")
+        if args_text.startswith("{") and args_text.endswith("}"):
+            try:
+                parsed_args = json.loads(args_text)
+                if isinstance(parsed_args, dict):
+                    args = parsed_args
+            except Exception:
+                pass
+        return _normalize_llm_decision({
+            "action": "tool",
+            "tool": tool_name,
+            "args": args,
+            "why": kv.get("why") or kv.get("reason") or compact_text(raw, 180),
+        })
+
+    if action == "summarize":
+        return _normalize_llm_decision({
+            "action": "summarize",
+            "summary": kv.get("summary") or kv.get("why") or compact_text(raw, 220),
+        })
+
+    if action == "finish":
+        return _normalize_llm_decision({
+            "action": "finish",
+            "reason": kv.get("reason") or kv.get("why") or compact_text(raw, 220),
+        })
+
+    return None
+
+
 def build_system_prompt() -> str:
     tool_lines = "\n".join(
         f"  - {name}: {desc}" for name, desc in TOOL_DESCRIPTIONS.items()
@@ -5166,6 +5364,7 @@ Examples:
 - wsl -d kali-linux nmap -sV -sC -A {{domain}}
 - wsl -d kali-linux nikto -h https://{{domain}}
 - wsl -d kali-linux whatweb https://{{domain}}
+- kali_shell and wsl_shell are aliases for direct local shell access when you want a clearer command surface.
 - wsl -d kali-linux wpscan --url https://{{domain}}
 - wsl -d kali-linux dirb https://{{domain}}
 - wsl -d kali-linux sqlmap -u "https://{{domain}}/page?id=1" --batch
@@ -5208,12 +5407,13 @@ Standard tools include: subfinder, httpx, wafw00f, nmap, nikto, sqlmap, nuclei, 
 gobuster, whatweb, wpscan, sslscan, curl, dig, whois, openssl, feroxbuster, and ALL
 kali/debian tools.
 If the initial page or Playwright text hints at a request-parameter-controlled object
-reference, use attack_surface_review first and then parameter_tamper or adjacent
-identifier testing. If Nmap finds no obvious exposed services on a web target, pivot
-to WhatWeb, Nikto, Gobuster/content discovery, parameter tampering, and app-specific
-testing instead of repeating the same port scan.
-If the target is a public DNS domain, start with subfinder and httpx to expand scope before
-brute forcing content; use wafw00f to detect CDN/WAF shielding and adjust tactics.
+reference, treat attack_surface_review and parameter_tamper as options, then choose
+the narrowest next probe that increases certainty. If Nmap finds no obvious exposed
+services on a web target, stop treating port scans as the default path and choose
+the next highest-signal web or app-specific tool instead.
+If the target is a public DNS domain, subfinder and httpx are often useful for scope
+expansion; use them when they add value, and use wafw00f only when WAF/CDN detection
+will change your next move.
 If the target is localhost, 127.0.0.1, a single-label host, or a local lab name like
 *.local / *.lan / *.internal / *.home.arpa, skip subfinder and focus on direct web
 enumeration and content discovery instead.
@@ -5222,9 +5422,10 @@ You are FULLY AUTONOMOUS. Do NOT use ask_user for permission. You are authorized
 {universal_directive}
 
 Rules:
-- Return STRICT JSON only (no markdown, no extra text)
+- Prefer a compact JSON decision object; if you respond more freely, the runtime will normalize it.
 - Never emit <think>, </think>, /think, or any other text outside the JSON object
 - ONLY target the authorized domain
+- Never target the internal control plane, dashboard, or workspace URLs; they are runtime artifacts, not scope.
 - Be thorough, aggressive, and systematic
 - Use run_command freely for any tool or command
 - If blocked_actions or memory_summary says an action was repeated, treat that as context;
@@ -5245,16 +5446,175 @@ Rules:
 Available tools:
 {tool_lines}
 
-Actions (return ONE as JSON):
+    Actions (prefer ONE compact JSON object, or a short directive like `tool: whatweb`):
 1. {{{{"action":"tool","tool":"<name>","args":{{}},"why":"reason"}}}}
 2. {{{{"action":"summarize","summary":"brief durable note"}}}}
 3. {{{{"action":"finish","reason":"why assessment is complete"}}}}"""
+
+
+def build_kernel_system_prompt() -> str:
+    return """You are Kernel, a recursive local automation agent.
+
+Objective:
+- Treat the user's objective as the only mission.
+- History is the source of truth.
+- Errors are not failures; they are data.
+
+Operating rules:
+- If you need to act, emit bash or python code blocks.
+- Code blocks execute immediately without permission.
+- Keep responses terse and task-focused.
+- Use the shell, the filesystem, and the available local environment.
+- If a command fails, inspect the error and adapt automatically.
+- Continue until you explicitly emit [TASK_COMPLETE].
+
+Output rules:
+- Prefer code blocks over explanation.
+- Do not include chain-of-thought or hidden reasoning.
+- You may include [TASK_COMPLETE] only when the objective is done."""
+
+
+def chat_text(messages: List[Dict[str, str]]) -> str:
+    if llm is None:
+        return ""
+    try:
+        resp = llm.chat(
+            messages=messages,
+            think=False,
+            options={"num_predict": 1024, "temperature": 0.2},
+        )
+        return _get_content(resp)
+    except Exception as e:
+        return f"LLM error: {e}"
+
+
+def run_recursive_kernel(
+    objective: str,
+    *,
+    model: str,
+    provider: str,
+    api_base: str = "",
+    api_key_env: str = "OPENAI_API_KEY",
+    fresh: bool = False,
+    resume: bool = True,
+) -> None:
+    global KERNEL
+    objective = (objective or "").strip()
+    if not objective:
+        objective = Prompt.ask(
+            "[bold]Kernel objective[/]",
+            default="",
+        ).strip()
+    if not objective:
+        console.print("[bold yellow]Kernel objective is required.[/]")
+        return
+
+    kernel = KERNEL or Kernel(WORKSPACE.kernel_history_path())
+    KERNEL = kernel
+    if fresh:
+        kernel.clear()
+
+    if resume and kernel.history:
+        console.print(
+            f"[dim]Resuming kernel history from {kernel.history_path} "
+            f"({len(kernel.history)} events)[/]"
+        )
+
+    system_prompt = build_kernel_system_prompt()
+    kernel.record_message("system", system_prompt)
+    kernel.record_message("user", objective, metadata={"kind": "objective"})
+
+    max_cycles = 1000
+    for cycle in range(1, max_cycles + 1):
+        context = kernel.context_text(max_events=160, max_chars=16000)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"Objective:\n{objective}\n\n"
+                    f"Current history:\n{context}\n\n"
+                    "If the objective is complete, emit [TASK_COMPLETE]. "
+                    "Otherwise emit only bash/python code blocks to continue."
+                ),
+            },
+        ]
+        response = chat_text(messages)
+        kernel.record_message("assistant", response, metadata={"cycle": cycle})
+
+        if "[TASK_COMPLETE]" in response:
+            console.print("[bold green]TASK_COMPLETE[/]")
+            break
+
+        if not response.strip():
+            kernel.record_message(
+                "note",
+                "Assistant response was empty.",
+                metadata={"cycle": cycle},
+            )
+            continue
+
+        def _print_stream(stream: str, line: str) -> None:
+            color = "green" if stream == "stdout" else "red"
+            console.print(f"  [{color}]{stream}[/{color}] {line}")
+
+        def _print_command(language: str, code: str, command: str) -> None:
+            console.print(f"[bold cyan]$ {language}[/]")
+            for line in code.splitlines():
+                console.print(f"[cyan]{line}[/]")
+
+        results = run_code_blocks(
+            kernel,
+            response,
+            cwd=OUTPUT_DIR,
+            timeout=COMMAND_TIMEOUT,
+            on_command=_print_command,
+            on_stream=_print_stream,
+        )
+        if not results:
+            kernel.record_message(
+                "note",
+                "Assistant response contained no executable code block.",
+                metadata={"cycle": cycle},
+            )
+            continue
+        for result in results:
+            kernel.record_message(
+                "tool",
+                json.dumps(result, ensure_ascii=False),
+                metadata={"cycle": cycle, "kind": "code_block_result"},
+            )
+
+    else:
+        console.print("[bold yellow]Kernel cycle budget exhausted.[/]")
+
+    try:
+        WORKSPACE.save_runtime({
+            "provider": provider,
+            "model": model,
+            "backend_provider": getattr(getattr(llm, "info", None), "provider", provider) if llm else provider,
+            "backend_model": getattr(getattr(llm, "info", None), "model", model) if llm else model,
+            "backend_base_url": getattr(getattr(llm, "info", None), "base_url", "") if llm else "",
+            "backend_api_key_env": getattr(getattr(llm, "info", None), "api_key_env", api_key_env) if llm else api_key_env,
+            "model_verified": bool(getattr(getattr(llm, "info", None), "model", model) == model) if llm else False,
+            "mission": objective,
+            "objective": objective,
+            "mode": "kernel",
+            "target": "",
+            "profile": "kernel",
+            "autonomy": "free",
+            "open_dashboard": False,
+        })
+    except Exception:
+        pass
 
 
 def build_user_prompt(state: AgentState) -> str:
     preview = []
     attack_surface = []
     for _, pg in list(state.pages.items())[:15]:
+        if _is_internal_control_plane_url(pg.get("url", "")):
+            continue
         preview.append({
             "url": pg.get("url", ""), "status_code": pg.get("status_code", 0),
             "title": pg.get("title", ""), "issues": pg.get("issues", []),
@@ -5326,7 +5686,8 @@ def build_user_prompt(state: AgentState) -> str:
         "tool_health": tool_health,
         "skill_registry": skills,
         "workspace": WORKSPACE.workspace_status(),
-        "dashboard_url": GATEWAY.dashboard_url if GATEWAY else f"http://127.0.0.1:{WORKSPACE.dashboard_port}/",
+        "control_plane_url": GATEWAY.dashboard_url if GATEWAY else f"http://127.0.0.1:{WORKSPACE.dashboard_port}/",
+        "control_plane_note": "internal runtime UI only; never target",
     }, indent=2)
 
 
@@ -5349,6 +5710,11 @@ def _llm_decision_needs_fallback(decision: Dict[str, Any]) -> bool:
 
 def _fallback_decision_from_state() -> Optional[Dict[str, Any]]:
     assert STATE is not None
+    recent_tools = {
+        str(sig).split(":", 1)[0].strip().lower()
+        for sig in STATE.recent_tool_signatures[-6:]
+        if str(sig).strip()
+    }
     if STATE.mode == "network":
         if STATE.network_hosts:
             host = (STATE.network_hosts[0].get("host") or "").strip()
@@ -5392,13 +5758,37 @@ def _fallback_decision_from_state() -> Optional[Dict[str, Any]]:
             "why": "Fallback after malformed LLM response; continue the crawl queue.",
         }
     if STATE.pages:
-        if len(STATE.pages) == 1:
-            page_url = next(iter(STATE.pages))
+        page_url = _state_origin_url() or next(iter(STATE.pages))
+        page = STATE.pages.get(page_url) or next(iter(STATE.pages.values()))
+        query_params = page.get("query_params", []) or []
+        form_count = int(page.get("form_count", 0) or 0)
+        if (query_params or form_count) and "parameter_tamper" not in recent_tools:
             return {
                 "action": "tool",
-                "tool": "attack_surface_review",
-                "args": {"page_url": page_url},
-                "why": "Fallback after malformed LLM response; deepen the current page.",
+                "tool": "parameter_tamper",
+                "args": {"url": page.get("url", page_url), "sample_limit": 12},
+                "why": "Fallback after malformed LLM response; probe the current page for parameter-driven behavior.",
+            }
+        if PLAYWRIGHT_AVAILABLE and "playwright_extract" not in recent_tools:
+            return {
+                "action": "tool",
+                "tool": "playwright_extract",
+                "args": {"url": page.get("url", page_url)},
+                "why": "Fallback after malformed LLM response; deepen the current page with rendered DOM context.",
+            }
+        if "check_broken_links" not in recent_tools:
+            return {
+                "action": "tool",
+                "tool": "check_broken_links",
+                "args": {"sample_limit": 40},
+                "why": "Fallback after malformed LLM response; check the current surface for broken navigation.",
+            }
+        if "whatweb" not in recent_tools:
+            return {
+                "action": "tool",
+                "tool": "whatweb",
+                "args": {"url": page.get("url", page_url)},
+                "why": "Fallback after malformed LLM response; re-fingerprint the current page from a different angle.",
             }
         return {
             "action": "tool",
@@ -5549,16 +5939,14 @@ def _normalize_llm_decision(decision: Any) -> Dict[str, Any]:
 
 
 def chat_json(messages: List[Dict[str, str]]) -> Dict[str, Any]:
-    # Force JSON-only responses from the model.
+    # Accept compact JSON or a short directive; normalize the model's output into a decision.
     if llm is None:
         return {"action": "summarize", "summary": "LLM backend is not initialized"}
     try:
         with console.status("[bold cyan]LLM deciding…", spinner="dots"):
             resp = llm.chat(
-                model=MODEL,
                 messages=messages,
                 think=False,
-                format="json",
                 options={"num_predict": 512, "temperature": 0.0},
             )
     except Exception as e:
@@ -5574,29 +5962,22 @@ def chat_json(messages: List[Dict[str, str]]) -> Dict[str, Any]:
     except Exception:
         pass
 
-    try:
-        return _normalize_llm_decision(_extract_json(content))
-    except json.JSONDecodeError:
-        # Ask LLM to repair
-        try:
-            repair_resp = llm.chat(
-                model=MODEL,
-                think=False,
-                format="json",
-                messages=[
-                    {"role": "system",
-                     "content": "Repair this into valid JSON only. Return JSON only."},
-                    {"role": "user", "content": content[:2000]},
-                ],
-                options={"num_predict": 256, "temperature": 0.0},
-            )
-            repair_text = _get_content(repair_resp)
-            with open(debug_path, "a", encoding="utf-8") as f:
-                f.write(f"\n--- REPAIR ATTEMPT ---\n{repair_text}\n")
-            return _normalize_llm_decision(_extract_json(repair_text))
-        except (json.JSONDecodeError, Exception) as e:
-            return {"action": "summarize",
-                    "summary": f"LLM output was not parseable JSON: {e}"}
+    decision = _parse_llm_decision_text(content)
+    if decision is not None:
+        return decision
+
+    fallback = _fallback_decision_from_state()
+    if fallback:
+        fallback.setdefault(
+            "why",
+            "LLM output was not directly parseable; using the highest-signal fallback move.",
+        )
+        fallback["llm_output"] = compact_text(content, 220)
+        return _normalize_llm_decision(fallback)
+    return {
+        "action": "summarize",
+        "summary": "LLM output was not parseable and no fallback move was available",
+    }
 
 
 def summarize_memory() -> None:
@@ -5885,6 +6266,7 @@ Examples:
 - wsl -d kali-linux hydra -L users.txt -P pass.txt <host> ssh
 - wsl -d kali-linux nmap --script vuln <host>
 - wsl -d kali-linux masscan <subnet> -p1-65535 --rate=1000
+- kali_shell and wsl_shell are aliases for direct local shell access.
 PREFER WSL tools — they are more powerful than native Windows."""
     return f"""You are an elite autonomous NETWORK penetration testing agent with a skill registry, workspace, and provider-agnostic model layer.
 You are authorized to test the ENTIRE network: {{target}}
@@ -5935,23 +6317,22 @@ You have COMPLETE FREEDOM to run any tool. You are FULLY AUTONOMOUS. Do not ask 
 {universal_directive}
 
 Rules:
-- Return STRICT JSON only
+- Prefer a compact JSON decision object; if you respond more freely, the runtime will normalize it.
 - Never emit <think>, </think>, /think, or any other text outside the JSON object
 - Be thorough — scan EVERY host you discover
 - Vary your approach per host based on services found
 - If the prompt already contains network_inventory or a host/service list, use it.
-- If blocked_actions or memory_summary says an action was repeated, treat that as context;
-  you decide whether to pivot or continue based on new evidence, not because the runtime
-  is forcing a choice.
+- Use blocked_actions and memory_summary as context, not commands; decide independently whether a repeat is warranted.
 - Prefer pivots that advance the graph: move from discovery to validation, from host to service, and from service to evidence-backed follow-up.
 - If the operator assigned a specific task, translate it into the smallest relevant set
   of tools and execute that task first.
-- Do not repeat the same subnet sweep or identical nmap host scan once it has been run.
-- After a timeout, pivot to a narrower scan, a single host, or a service-specific tool.
-- If web ports appear, immediately pivot to whatweb, wafw00f, httpx, nuclei, gobuster,
-  and nikto on the exact URL rather than repeating subnet or host scans.
-- If SMB or SNMP ports appear, pivot to enum4linux, smbclient, or snmpwalk instead of
-  repeating the same port scan.
+- Avoid re-running the same subnet sweep or identical nmap host scan unless new evidence clearly justifies another pass.
+- After a timeout, narrow the probe, switch to a single host, or use a service-specific tool.
+- When web ports appear, favor web-specific tools such as whatweb, httpx, nuclei, gobuster,
+  and nikto on the exact URL when they add value.
+- When SMB or SNMP ports appear, consider enum4linux, smbclient, or snmpwalk if they will
+  add evidence beyond a repeated port scan.
+- Never target the internal control plane, dashboard, or workspace URLs; they are runtime artifacts, not scope.
 - Log everything for the report
 - Linux tools are routed automatically to the best WSL distro; request tools by name, not by wrapping them in wsl unless you need a specific distro.
 - For host-scanning tools like nmap, masscan, rustscan, enum4linux, smbclient, snmpwalk, sslscan, and traceroute, use bare hosts or CIDRs, not full URLs.
@@ -5966,7 +6347,7 @@ Rules:
 Available tools:
 {tool_lines}
 
-Actions (return ONE as JSON):
+Actions (prefer ONE compact JSON object, or a short directive like `tool: whatweb`):
 1. {{{{"action":"tool","tool":"<name>","args":{{}},"why":"reason"}}}}
 2. {{{{"action":"summarize","summary":"brief note"}}}}
 3. {{{{"action":"finish","reason":"why assessment is complete"}}}}"""
@@ -5975,6 +6356,11 @@ Actions (return ONE as JSON):
 def deterministic_kickoff(registry: ToolRegistry) -> None:
     assert STATE is not None
     ui_phase("Bootstrap Phase")
+    if getattr(STATE, "autonomy_mode", "free") == "free":
+        console.print(
+            "  [dim]Free autonomy mode: skipping scripted bootstrap and letting the model choose the first move.[/]"
+        )
+        return
     profile = getattr(run_agent, "_profile", "standard")
 
     steps = [
@@ -6023,6 +6409,11 @@ def network_kickoff(registry: ToolRegistry) -> None:
     """Deterministic kickoff for network mode."""
     assert STATE is not None
     ui_phase("Network Discovery Phase")
+    if getattr(STATE, "autonomy_mode", "free") == "free":
+        console.print(
+            "  [dim]Free autonomy mode: skipping scripted network bootstrap and letting the model choose the first move.[/]"
+        )
+        return
     profile = getattr(run_agent, "_profile", "standard")
     host_limits = {"quick": 4, "standard": 8, "deep": 12}
     sweep_timeout = {"quick": 90, "standard": 120, "deep": 180}.get(profile, 120)
@@ -6330,6 +6721,8 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
     registry.register("snmpwalk", tool_snmpwalk)
     registry.register("run", tool_run_command)
     registry.register("run_command", tool_run_command)
+    registry.register("kali_shell", tool_run_command)
+    registry.register("wsl_shell", tool_run_command)
     registry.register("install", tool_install)
     registry.register("install_tool", tool_install_tool)
     registry.register("ask_user", tool_ask_user)
@@ -6435,8 +6828,29 @@ def run_agent(domain: str = DEFAULT_DOMAIN, resume: bool = True,
                         "note": block_note,
                     })
                     if autonomy_mode == "free":
-                        console.print(
-                            f"  [dim]⤳ repeated action allowed in free autonomy mode[/]")
+                        if repeat_count >= 2:
+                            fallback = _fallback_decision_from_state()
+                            if fallback:
+                                fallback_tool = str(fallback.get("tool", "")).strip()
+                                if fallback_tool and fallback_tool != tool_name:
+                                    console.print(
+                                        "  [dim]⤳ repeat threshold reached; pivoting instead of replaying the same move[/]"
+                                    )
+                                    decision = fallback
+                                    decision["action"] = "tool"
+                                    action = "tool"
+                                    tool_name = fallback_tool
+                                    args = decision.get("args", {}) or {}
+                                    sig = f"{tool_name}:{json.dumps(args, sort_keys=True)}"
+                                else:
+                                    console.print(
+                                        f"  [dim]⤳ repeated action allowed in free autonomy mode[/]")
+                            else:
+                                console.print(
+                                    f"  [dim]⤳ repeated action allowed in free autonomy mode[/]")
+                        else:
+                            console.print(
+                                f"  [dim]⤳ repeated action allowed in free autonomy mode[/]")
                     else:
                         console.print(
                             f"  [dim]⤳ skipped (duplicate action)[/]")
@@ -6648,6 +7062,7 @@ if __name__ == "__main__":
     _fresh = False
     _cli = False
     _has_explicit_target = False
+    _kernel_mode = False
     _mode = "web"
     _profile = str(_runtime_defaults.get("profile", "standard") or "standard")
     _task = str(_runtime_defaults.get("mission", "") or "")
@@ -6704,13 +7119,16 @@ if __name__ == "__main__":
         elif arg in {"--api", "--openai-compatible"}:
             _provider = "openai-compatible"
             _cli = True
+        elif arg == "--kernel":
+            _kernel_mode = True
+            _cli = True
         elif arg == "--dashboard":
             _dashboard = True
             _cli = True
         elif arg == "--no-dashboard":
             _dashboard = False
             _cli = True
-        elif arg in {"dashboard", "onboard", "doctor", "skills"} and not _command:
+        elif arg in {"dashboard", "onboard", "doctor", "skills", "kernel"} and not _command:
             _command = arg
             _cli = True
         elif arg == "--api-base" and i + 1 < len(_args):
@@ -6745,11 +7163,20 @@ if __name__ == "__main__":
         skill_catalog=SKILL_CATALOG,
         dashboard_port=WORKSPACE.dashboard_port,
     )
+    if _kernel_mode:
+        _mode = "kernel"
+        _dashboard = False
+        if not _task.strip():
+            _task = Prompt.ask(
+                "[bold]Kernel objective[/]",
+                default="",
+            ).strip()
     WORKSPACE.save_runtime({
         "provider": _provider,
         "model": _model,
         "autonomy": _autonomy,
         "mission": _task,
+        "objective": _task,
         "mode": _mode,
         "target": _domain,
         "profile": _profile,
@@ -6758,9 +7185,10 @@ if __name__ == "__main__":
         "open_dashboard": _dashboard,
     })
     dashboard_url = GATEWAY.dashboard_url
-    if _command not in {"doctor", "skills"}:
+    if _command not in {"doctor", "skills", "kernel"} and not _kernel_mode:
         dashboard_url = GATEWAY.start_dashboard(open_browser=_dashboard)
-    print(f"[platform] Dashboard endpoint: {dashboard_url}")
+    if _command not in {"kernel"} and not _kernel_mode:
+        print(f"[platform] Dashboard endpoint: {dashboard_url}")
 
     if _command in {"doctor", "skills"}:
         if _command == "doctor":
@@ -6770,6 +7198,7 @@ if __name__ == "__main__":
                     f"[bold]Agent:[/] {WORKSPACE.agent_id}",
                     f"[bold]Dashboard:[/] {dashboard_url}",
                     f"[bold]Model:[/] {_model}",
+                    f"[bold]Model check:[/] {_model_verification_text()}",
                     f"[bold]Provider:[/] {_provider}",
                     f"[bold]Autonomy:[/] {_autonomy}",
                     f"[bold]Skill packs:[/] {len(SKILL_CATALOG)}",
@@ -6785,6 +7214,18 @@ if __name__ == "__main__":
                 border_style="bright_blue",
                 padding=(1, 2),
             ))
+        raise SystemExit(0)
+
+    if _command == "kernel" or _kernel_mode:
+        run_recursive_kernel(
+            _task,
+            model=MODEL,
+            provider=_provider,
+            api_base=_api_base,
+            api_key_env=_api_key_env,
+            fresh=_fresh,
+            resume=not _fresh,
+        )
         raise SystemExit(0)
 
     if _command in {"dashboard", "onboard"} and not _has_explicit_target:
@@ -6846,9 +7287,19 @@ if __name__ == "__main__":
         api_base=_api_base,
         api_key_env=_api_key_env,
     )
+    backend_info = getattr(llm, "info", None)
+    backend_model = getattr(backend_info, "model", MODEL) if backend_info else MODEL
+    backend_provider = getattr(backend_info, "provider", _provider) if backend_info else _provider
+    backend_base_url = getattr(backend_info, "base_url", "") if backend_info else ""
+    backend_api_key_env = getattr(backend_info, "api_key_env", _api_key_env) if backend_info else _api_key_env
     WORKSPACE.save_runtime({
         "provider": _provider,
         "model": MODEL,
+        "backend_provider": backend_provider,
+        "backend_model": backend_model,
+        "backend_base_url": backend_base_url,
+        "backend_api_key_env": backend_api_key_env,
+        "model_verified": backend_model == MODEL,
         "autonomy": _autonomy,
         "mission": _task,
         "mode": _mode,

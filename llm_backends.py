@@ -2,9 +2,102 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
+import shutil
+import subprocess
 from typing import Any, Dict, List, Optional, Protocol
 
 import requests
+
+
+DEFAULT_OLLAMA_MODEL = "hf.co/mradermacher/Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated-i1-GGUF:Q4_K_M"
+
+
+def _normalize_model_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
+
+
+def _tokenize_model_name(value: str) -> List[str]:
+    return [token for token in re.split(r"[^a-z0-9]+", (value or "").lower()) if token]
+
+
+def _ollama_installed_models() -> List[str]:
+    if not shutil.which("ollama"):
+        return []
+    try:
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    models: List[str] = []
+    for raw_line in (result.stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.upper().startswith("NAME "):
+            continue
+        parts = line.split()
+        if not parts:
+            continue
+        name = parts[0].strip()
+        if name and name.upper() != "NAME":
+            models.append(name)
+    return models
+
+
+def resolve_ollama_model(requested: str) -> str:
+    requested = (requested or "").strip()
+    if not requested:
+        return DEFAULT_OLLAMA_MODEL
+
+    installed = _ollama_installed_models()
+    if not installed:
+        return requested
+
+    requested_norm = _normalize_model_name(requested)
+    installed_norm = {name: _normalize_model_name(name) for name in installed}
+
+    for candidate, candidate_norm in installed_norm.items():
+        if candidate == requested or candidate_norm == requested_norm:
+            return candidate
+
+    requested_tokens = _tokenize_model_name(requested)
+    alias_tokens = {
+        "qwen3coder30b": ["qwen3", "coder", "30b"],
+        "qwen3coder": ["qwen3", "coder"],
+    }.get(requested_norm)
+    if alias_tokens:
+        requested_tokens = alias_tokens
+
+    if requested_tokens:
+        scored: List[tuple[int, int, str]] = []
+        for candidate, candidate_norm in installed_norm.items():
+            token_score = sum(1 for token in requested_tokens if token in candidate_norm)
+            if token_score == 0:
+                continue
+            exact_bonus = 20 if requested_norm and requested_norm in candidate_norm else 0
+            family_bonus = 5 if any(token in candidate_norm for token in requested_tokens[:2]) else 0
+            score = token_score * 10 + exact_bonus + family_bonus
+            scored.append((score, len(candidate_norm), candidate))
+        if scored:
+            scored.sort(reverse=True)
+            return scored[0][2]
+
+    for candidate, candidate_norm in installed_norm.items():
+        if requested_norm and requested_norm in candidate_norm:
+            return candidate
+        if candidate_norm and candidate_norm in requested_norm:
+            return candidate
+
+    return requested
 
 
 @dataclass(frozen=True)
@@ -127,7 +220,8 @@ def build_backend(provider: str, model: str, *, api_base: str = "",
                   api_key: str = "") -> ChatBackend:
     normalized = (provider or "ollama").strip().lower()
     if normalized in {"local", "ollama"}:
-        return OllamaBackend(model=model, host=api_base or "http://127.0.0.1:11434")
+        resolved_model = resolve_ollama_model(model)
+        return OllamaBackend(model=resolved_model, host=api_base or "http://127.0.0.1:11434")
     if normalized in {"api", "openai", "openai-compatible"}:
         return OpenAICompatibleBackend(
             model=model,

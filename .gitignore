@@ -22,6 +22,12 @@ ENV/
 # Agent output (generated at runtime)
 audit_output/
 workspace/
+state/
+vanguard_history.jsonl
+.vanguard_journal.json
+scripts/
+connectivity.json
+backup/
 
 # OS
 .DS_Store
